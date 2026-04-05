@@ -111,22 +111,42 @@ export default function ChatDetail() {
 
   const processZipDownload = async () => {
     if (selectedMedia.size === 0) return alert("Pilih minimal 1 foto dengan mengklik gambar");
+    if (!customer?.order_id) {
+       const confirmLanjut = window.confirm("Nomor Order / Resi belum diisi. Nama file ZIP akan menggunakan Nomor HP. Tetap lanjut download?");
+       if (!confirmLanjut) return;
+    }
+    
     setLoadingMedia(true);
     
     try {
-      const zip = new JSZip();
       const selectedItems = mediaList.filter(m => selectedMedia.has(m.id));
+      const chunkSize = 25; // Maksimal 25 foto per file ZIP (Sesuai paket polaroid)
       
-      let count = 0;
-      for (const item of selectedItems) {
-        const res = await fetch(item.file_url);
-        const blob = await res.blob();
-        const ext = item.file_url.split('.').pop() || 'jpg';
-        zip.file(`foto_${++count}.${ext}`, blob);
-      }
+      const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
 
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      saveAs(zipBlob, `Order_${customer?.order_id || 'Unknown'}_${customer?.phone_number}.zip`);
+      // Pecah menjadi beberapa batch (Sheet 1, Sheet 2, dst)
+      for (let i = 0; i < selectedItems.length; i += chunkSize) {
+          const chunk = selectedItems.slice(i, i + chunkSize);
+          const sheetNumber = Math.floor(i / chunkSize) + 1;
+          
+          const zip = new JSZip();
+          let count = 0;
+          
+          // Download spesifik 25 foto untuk sheet ini
+          for (const item of chunk) {
+            const res = await fetch(item.file_url);
+            const blob = await res.blob();
+            const ext = item.file_url.split('.').pop() || 'jpg';
+            // Penamaan foto di dalam ZIP juga bisa di-reset per sheet atau dilanjut. Kita pakai format standar 1-25.
+            zip.file(`foto_${++count}.${ext}`, blob);
+          }
+
+          // Generate file zip ke browser
+          const zipBlob = await zip.generateAsync({ type: "blob" });
+          const zipFileName = `${orderName}_sheet${sheetNumber}.zip`;
+          
+          saveAs(zipBlob, zipFileName);
+      }
       
     } catch (error) {
       console.error(error);
