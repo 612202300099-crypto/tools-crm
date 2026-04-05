@@ -69,6 +69,21 @@ async function processMessageCommand(message) {
         // Tangkap Waktu Pesan Asli dari WA (Support sinkronisasi offline)
         const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
 
+        // 0. ANTI-DUPLIKAT (Cek apakah pesan ini pernah masuk DB sebelumnya)
+        if (customer && customer.id) {
+            const { data: duplicate } = await supabase
+                .from('messages')
+                .select('id')
+                .eq('customer_id', customer.id)
+                .eq('created_at', msgTimestamp)
+                .limit(1);
+
+            if (duplicate && duplicate.length > 0) {
+                // Pesan duplikat dari sinkronisasi offline
+                return; 
+            }
+        }
+
         // Rekap pesan text / default
         let messageRecord = null;
         if (message.body || !message.hasMedia) {
@@ -89,6 +104,11 @@ async function processMessageCommand(message) {
             console.log(`📥 Mengunduh media dari ${phoneNumber}...`);
             const media = await message.downloadMedia();
             
+            if (!media || !media.data) {
+                console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${phoneNumber}`);
+                return;
+            }
+
             if (media && media.data) {
                 const buffer = Buffer.from(media.data, 'base64');
                 const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
@@ -147,28 +167,35 @@ client.on('ready', async () => {
     qrCodeData = '';
     isConnected = true;
 
-    // [KOREKSI FATAL 2]: FITUR SINKRONISASI OFFLINE CHAT (Membaca chat tertinggal)
+    // [KOREKSI FATAL 3]: FITUR SINKRONISASI 4 HARI TERAKHIR (Bukan cuma yang unread)
     try {
-        console.log('🔄 Memeriksa pesan WA yang terlewat saat bot mati...');
+        console.log('🔄 Menyisir semua pesan dalam rentang 4 HARI TERAKHIR...');
         const chats = await client.getChats();
         
-        let missedCount = 0;
+        // Buat batas waktu 4 hari ke belakang
+        const targetDate = new Date();
+        targetDate.setDate(targetDate.getDate() - 4);
+        const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
+        
+        let processedCount = 0;
         for (const chat of chats) {
-            if (chat.unreadCount > 0 && !chat.isGroup) {
-                const unreadMessages = await chat.fetchMessages({ limit: chat.unreadCount });
-                // Proses satu persatu pesan masuk
-                for (const msg of unreadMessages) {
-                    if (!msg.fromMe) {
-                        missedCount++;
+            if (!chat.isGroup) {
+                // Tarik 100 pesan terakhir dari setiap chat
+                const historyMessages = await chat.fetchMessages({ limit: 100 });
+                // Proses satu persatu pesan masuk yg masih masuk rentang 4 hari
+                for (const msg of historyMessages) {
+                    if (!msg.fromMe && msg.timestamp >= limitTimestamp) {
+                        processedCount++;
                         await processMessageCommand(msg);
                     }
                 }
-                // Tandai sudah dibaca di HP jika sukses masuk database
-                await chat.sendSeen();
+                // Tandai sudah dibaca di HP khusus yg masih ada badge hijaunya
+                if (chat.unreadCount > 0) {
+                    await chat.sendSeen();
+                }
             }
         }
-        if (missedCount > 0) console.log(`✅ Berhasil menyerap ${missedCount} pesan offline.`);
-        else console.log('✅ Sinkronisasi up-to-date (0 pesan offline).');
+        console.log(`✅ Selesai menyisir dan menarik ${processedCount} pesan potensial dari 4 hari yang lalu.`);
     } catch (e) {
          console.error('⚠️ Gagal sinkronisasi pesan offline:', e);
     }
