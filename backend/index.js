@@ -55,21 +55,14 @@ async function processMessageCommand(message) {
             if (createError) throw createError;
             customer = newCustomer;
 
-            const welcomeMsg = `Halo Kak ${contact.pushname || ''}! 🎉\nTerima kasih atas pesanannya.\n\nSilakan kirimkan SEMUA FOTO polaroid Anda di chat ini.\n\n*(Catatan: Pastikan kirim sebagai 'Foto/Galeri' biasa ya agar terdeteksi automatis).*`;
-            await client.sendMessage(message.from, welcomeMsg);
-            
-            await supabase.from('messages').insert({
-                customer_id: customer.id,
-                body: welcomeMsg,
-                is_from_me: true,
-                created_at: new Date().toISOString()
-            });
+            // Mode Siluman: Jangan balas pesan otomatis "Halo kak". Posisikan bot sebagai penyedot pasif.
         }
 
-        // Tangkap Waktu Pesan Asli dari WA (Support sinkronisasi offline)
+        // KODE PELACAK INTERNAL WA (SANGAT UNIK PER FOTO)
+        const waMessageId = message.id._serialized;
         const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
 
-        // 0. ANTI-DUPLIKAT & FITUR PENYEMBUH MEDIA GAGAL
+        // 0. ANTI-DUPLIKAT (Cek Kesamaan Kode KTP WA_ID Asli)
         let isDuplicate = false;
         let messageRecord = null;
 
@@ -77,8 +70,7 @@ async function processMessageCommand(message) {
             const { data: duplicate } = await supabase
                 .from('messages')
                 .select('id')
-                .eq('customer_id', customer.id)
-                .eq('created_at', msgTimestamp)
+                .eq('wa_id', waMessageId) 
                 .limit(1);
 
             if (duplicate && duplicate.length > 0) {
@@ -88,9 +80,9 @@ async function processMessageCommand(message) {
         }
 
         if (isDuplicate) {
-            if (!message.hasMedia) return; // Abaikan 100% jika duplicate teks biasa
+            if (!message.hasMedia) return; // Abaikan 100% jika teks biasa.
             
-            // JIKA TERNYATA MEDIA, mari teliti! Apakah fotonya kemarin gagal diupload?
+            // Healing Media Jika RLS Kemarin Menghambat Fotonya.
             const { data: secureMedia } = await supabase
                 .from('media')
                 .select('id')
@@ -98,18 +90,17 @@ async function processMessageCommand(message) {
                 .limit(1);
             
             if (secureMedia && secureMedia.length > 0) {
-                 return; // Media sudah aman terunggah di masa lalu, abaikan.
+                 return; // Aman.
             }
-            // Jika sampai ke baris ini, berarti teksnya ada tapi FOTONYA HILANG GARA-GARA RLS KEMARIN! 
-            // BIARKAN KODE TURUN KE BAWAH UNTUK MENDOWNLOAD PAKSA MEDIANYA LAGI!
             console.log('🩹 Menyembuhkan Media yang gagal Upload gara-gara RLS tempo hari...');
         } else {
             // Rekap pesan text / default yang benar-benar baru
-            // FITUR BARU: Memaksa rekaman jangkar di tabel messages meski foto tersebut gundul (tanpa teks)
+            // FITUR BARU: Memaksa rekaman jangkar WA_ID di tabel messages!
             const { data: msgData, error: msgError } = await supabase
                 .from('messages')
                 .insert({
                     customer_id: customer.id,
+                    wa_id: waMessageId,
                     body: message.body || '[Attachment Dokumen/Gambar]',
                     is_from_me: false,
                     created_at: msgTimestamp
@@ -199,8 +190,8 @@ client.on('ready', async () => {
         let processedCount = 0;
         for (const chat of chats) {
             if (!chat.isGroup) {
-                // Tarik 100 pesan terakhir dari setiap chat
-                const historyMessages = await chat.fetchMessages({ limit: 100 });
+                // Tarik 1000 pesan terakhir dari setiap chat untuk mencegah media barbar yg tertinggal
+                const historyMessages = await chat.fetchMessages({ limit: 1000 });
                 // Proses satu persatu pesan masuk yg masih masuk rentang 4 hari
                 for (const msg of historyMessages) {
                     if (!msg.fromMe && msg.timestamp >= limitTimestamp) {
