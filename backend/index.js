@@ -105,19 +105,18 @@ async function processMessageCommand(message) {
             console.log('🩹 Menyembuhkan Media yang gagal Upload gara-gara RLS tempo hari...');
         } else {
             // Rekap pesan text / default yang benar-benar baru
-            if (message.body || !message.hasMedia) {
-                 const { data: msgData, error: msgError } = await supabase
-                    .from('messages')
-                    .insert({
-                        customer_id: customer.id,
-                        body: message.body || '[Attachment Dokumen/Gambar]',
-                        is_from_me: false,
-                        created_at: msgTimestamp
-                    })
-                    .select()
-                    .single();
-                if(!msgError) messageRecord = msgData;
-            }
+            // FITUR BARU: Memaksa rekaman jangkar di tabel messages meski foto tersebut gundul (tanpa teks)
+            const { data: msgData, error: msgError } = await supabase
+                .from('messages')
+                .insert({
+                    customer_id: customer.id,
+                    body: message.body || '[Attachment Dokumen/Gambar]',
+                    is_from_me: false,
+                    created_at: msgTimestamp
+                })
+                .select()
+                .single();
+            if(!msgError) messageRecord = msgData;
         }
 
         if (message.hasMedia) {
