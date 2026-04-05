@@ -69,7 +69,10 @@ async function processMessageCommand(message) {
         // Tangkap Waktu Pesan Asli dari WA (Support sinkronisasi offline)
         const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
 
-        // 0. ANTI-DUPLIKAT (Cek apakah pesan ini pernah masuk DB sebelumnya)
+        // 0. ANTI-DUPLIKAT & FITUR PENYEMBUH MEDIA GAGAL
+        let isDuplicate = false;
+        let messageRecord = null;
+
         if (customer && customer.id) {
             const { data: duplicate } = await supabase
                 .from('messages')
@@ -79,25 +82,42 @@ async function processMessageCommand(message) {
                 .limit(1);
 
             if (duplicate && duplicate.length > 0) {
-                // Pesan duplikat dari sinkronisasi offline
-                return; 
+                isDuplicate = true;
+                messageRecord = duplicate[0];
             }
         }
 
-        // Rekap pesan text / default
-        let messageRecord = null;
-        if (message.body || !message.hasMedia) {
-             const { data: msgData, error: msgError } = await supabase
-                .from('messages')
-                .insert({
-                    customer_id: customer.id,
-                    body: message.body || '[Attachment Dokumen/Gambar]',
-                    is_from_me: false,
-                    created_at: msgTimestamp
-                })
-                .select()
-                .single();
-            if(!msgError) messageRecord = msgData;
+        if (isDuplicate) {
+            if (!message.hasMedia) return; // Abaikan 100% jika duplicate teks biasa
+            
+            // JIKA TERNYATA MEDIA, mari teliti! Apakah fotonya kemarin gagal diupload?
+            const { data: secureMedia } = await supabase
+                .from('media')
+                .select('id')
+                .eq('message_id', messageRecord.id)
+                .limit(1);
+            
+            if (secureMedia && secureMedia.length > 0) {
+                 return; // Media sudah aman terunggah di masa lalu, abaikan.
+            }
+            // Jika sampai ke baris ini, berarti teksnya ada tapi FOTONYA HILANG GARA-GARA RLS KEMARIN! 
+            // BIARKAN KODE TURUN KE BAWAH UNTUK MENDOWNLOAD PAKSA MEDIANYA LAGI!
+            console.log('🩹 Menyembuhkan Media yang gagal Upload gara-gara RLS tempo hari...');
+        } else {
+            // Rekap pesan text / default yang benar-benar baru
+            if (message.body || !message.hasMedia) {
+                 const { data: msgData, error: msgError } = await supabase
+                    .from('messages')
+                    .insert({
+                        customer_id: customer.id,
+                        body: message.body || '[Attachment Dokumen/Gambar]',
+                        is_from_me: false,
+                        created_at: msgTimestamp
+                    })
+                    .select()
+                    .single();
+                if(!msgError) messageRecord = msgData;
+            }
         }
 
         if (message.hasMedia) {
