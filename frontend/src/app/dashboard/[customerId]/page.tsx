@@ -152,8 +152,9 @@ export default function ChatDetail() {
     
     setIsSending(true);
     try {
-       let waUrl = process.env.NEXT_PUBLIC_WA_ENGINE_URL;
-       if (!waUrl) waUrl = `http://${window.location.hostname}:3001`;
+       // KOREKSI DARURAT: Kita tembak langsung ke HTTPS aslinya tanpa melewati Env Variable Vercel
+       // karena "Failed to fetch" 90% mengindikasikan Vercel kehilangan jejak URL API-nya.
+       const waUrl = "https://api-wa.parecustom.com";
        
        console.log("Mencoba fetch ke URL:", `${waUrl}/api/wa/send`);
        
