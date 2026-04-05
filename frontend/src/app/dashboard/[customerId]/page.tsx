@@ -164,7 +164,10 @@ export default function ChatDetail() {
     try {
        let waUrl = process.env.NEXT_PUBLIC_WA_ENGINE_URL;
        if (!waUrl) waUrl = `http://${window.location.hostname}:3001`;
-       await fetch(`${waUrl}/api/wa/send`, {
+       
+       console.log("Mencoba fetch ke URL:", `${waUrl}/api/wa/send`);
+       
+       const res = await fetch(`${waUrl}/api/wa/send`, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({ 
@@ -173,9 +176,16 @@ export default function ChatDetail() {
                customer_id: customer.id
            })
        });
+       
+       if (!res.ok) {
+           const errData = await res.json().catch(() => ({}));
+           throw new Error(errData.error || `HTTP Error ${res.status}`);
+       }
+       
        setReplyText("");
-    } catch(err) {
-       alert("Gagal membalas pesan. Pastikan bot WA menyala.");
+    } catch(err: any) {
+       console.error("Fetch Error:", err);
+       alert(`Gagal membalas pesan. Detail: ${err.message}`);
     } finally {
        setIsSending(false);
     }
