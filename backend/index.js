@@ -180,38 +180,8 @@ client.on('ready', async () => {
     qrCodeData = '';
     isConnected = true;
 
-    // [KOREKSI FATAL 3]: FITUR SINKRONISASI 4 HARI TERAKHIR (Bukan cuma yang unread)
-    try {
-        console.log('🔄 Menyisir semua pesan dalam rentang 4 HARI TERAKHIR...');
-        const chats = await client.getChats();
-        
-        // Buat batas waktu 4 hari ke belakang
-        const targetDate = new Date();
-        targetDate.setDate(targetDate.getDate() - 4);
-        const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
-        
-        let processedCount = 0;
-        for (const chat of chats) {
-            if (!chat.isGroup) {
-                // Tarik 1000 pesan terakhir dari setiap chat untuk mencegah media barbar yg tertinggal
-                const historyMessages = await chat.fetchMessages({ limit: 1000 });
-                // Proses satu persatu pesan masuk yg masih masuk rentang 4 hari
-                for (const msg of historyMessages) {
-                    if (msg.timestamp >= limitTimestamp) {
-                        processedCount++;
-                        await processMessageCommand(msg);
-                    }
-                }
-                // Tandai sudah dibaca di HP khusus yg masih ada badge hijaunya
-                if (chat.unreadCount > 0) {
-                    await chat.sendSeen();
-                }
-            }
-        }
-        console.log(`✅ Selesai menyisir dan menarik ${processedCount} pesan potensial dari 4 hari yang lalu.`);
-    } catch (e) {
-         console.error('⚠️ Gagal sinkronisasi pesan offline:', e);
-    }
+    // Sinkronisasi 4 Hari dihapus per-permintaan agar bot menyala lebih cepat.
+    // Jika ada chat yang terlewat saat bot mati, gunakan tombol "Gali Ulang" di Vercel.
 });
 
 client.on('disconnected', (reason) => {
@@ -219,9 +189,16 @@ client.on('disconnected', (reason) => {
     isConnected = false;
 });
 
-client.on('message_create', async (message) => {
-    // Menangkap pesan masuk MAUPUN pesan keluar (Biar balasan dari HP masuk Vercel)
+client.on('message', async (message) => {
+    // Telinga Kanan: Khusus menangkap pesan MASUK murni
     await processMessageCommand(message);
+});
+
+client.on('message_create', async (message) => {
+    // Telinga Kiri: Khusus sadap pesan KELUAR (Balasan manual dari fisik HP/WA Web)
+    if (message.fromMe) {
+        await processMessageCommand(message);
+    }
 });
 
 client.initialize();
@@ -240,10 +217,19 @@ app.post('/api/wa/send', async (req, res) => {
     
     try {
         const chatId = phone_number + '@c.us';
-        await client.sendMessage(chatId, message);
+        const sentMsg = await client.sendMessage(chatId, message);
 
-        // [Koreksi]: Insert ke database dihapus dari sini karena event 'message_create' 
-        // akan otomatis menangkap pesan keluar dan memasukkannya ke DB tanpa double!
+        // Langsung suntikkan ke DB saat tombol Vercel ditekan dan rekam WA_ID presisi
+        // Agar real-time UI langsung muncul dan mencegah duplicate dari 'message_create'
+        if (customer_id && sentMsg && sentMsg.id && sentMsg.id._serialized) {
+           await supabase.from('messages').insert({
+               customer_id: customer_id,
+               wa_id: sentMsg.id._serialized,
+               body: message,
+               is_from_me: true,
+               created_at: new Date(sentMsg.timestamp * 1000).toISOString()
+           });
+        }
         
         res.json({ success: true, message: 'Sent' });
     } catch (err) {
