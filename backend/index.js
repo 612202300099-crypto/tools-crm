@@ -32,11 +32,8 @@ async function processMessageCommand(message) {
         const chat = await message.getChat();
         if (chat.isGroup) return; 
         
-        let rawNumber = message.fromMe ? message.to : message.from;
-        // TOLAK MENTAH-MENTAH PESAN INTERNAL MULTI-DEVICE / @LID BUGS
-        if (rawNumber.includes('@lid') || rawNumber.includes('@broadcast')) return; 
-        
-        const phoneNumber = rawNumber.replace(/@c\.us|@s\.whatsapp\.net/g, '');
+        const contact = await message.getContact();
+        const phoneNumber = contact.number;
 
         let { data: customer, error: customerError } = await supabase
             .from('customers')
@@ -49,17 +46,17 @@ async function processMessageCommand(message) {
                 .from('customers')
                 .insert({
                     phone_number: phoneNumber,
-                    name: 'Pelanggan ' + phoneNumber,
+                    name: contact.pushname || 'Pelanggan Baru',
                     status: 'BELUM_KIRIM_FOTO'
                 })
                 .select()
                 .single();
 
             if (createError) {
+                // Anti Race Condition: jika nomor ini baru saja dibuat oleh proses paralel
                 if (createError.code === '23505') {
-                    // KASUS 1: Race Condition! Pelanggan barusan di-create oleh proses paralel WA. Tarik ulang datanya!
-                    const { data: retryCustomer } = await supabase.from('customers').select('*').eq('phone_number', phoneNumber).single();
-                    customer = retryCustomer;
+                    const { data: existing } = await supabase.from('customers').select('*').eq('phone_number', phoneNumber).single();
+                    customer = existing;
                 } else {
                     throw createError;
                 }
@@ -67,7 +64,7 @@ async function processMessageCommand(message) {
                 customer = newCustomer;
             }
         } else {
-            // KASUS 3: Pelanggan sudah ada, WAJIB UPDATE waktu tabel `customers` agar namanya Sundul teratas di Inbox Vercel!
+            // Pelanggan sudah ada — sundul ke atas di Inbox
             await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer.id);
         }
 
@@ -105,7 +102,7 @@ async function processMessageCommand(message) {
             if (secureMedia && secureMedia.length > 0) {
                  return; // Aman.
             }
-            console.log('🩹 Menyembuhkan Media yang gagal Upload gara-gara RLS tempo hari...');
+            console.log('­ƒ®╣ Menyembuhkan Media yang gagal Upload gara-gara RLS tempo hari...');
         } else {
             // Rekap pesan text / default yang benar-benar baru
             // FITUR BARU: Memaksa rekaman jangkar WA_ID di tabel messages!
@@ -115,7 +112,7 @@ async function processMessageCommand(message) {
                     customer_id: customer.id,
                     wa_id: waMessageId,
                     body: message.body || '[Attachment Dokumen/Gambar]',
-                    is_from_me: message.fromMe,
+                    is_from_me: false,
                     created_at: msgTimestamp
                 })
                 .select()
@@ -124,11 +121,11 @@ async function processMessageCommand(message) {
         }
 
         if (message.hasMedia) {
-            console.log(`📥 Mengunduh media dari ${phoneNumber}...`);
+            console.log(`­ƒôÑ Mengunduh media dari ${phoneNumber}...`);
             const media = await message.downloadMedia();
             
             if (!media || !media.data) {
-                console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${phoneNumber}`);
+                console.log(`ÔÜá´©Å Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${phoneNumber}`);
                 return;
             }
 
@@ -149,7 +146,7 @@ async function processMessageCommand(message) {
                     });
 
                 if (uploadError) {
-                    console.error('❌ GAGAL UPLOAD STORAGE:', uploadError.message);
+                    console.error('ÔØî GAGAL UPLOAD STORAGE:', uploadError.message);
                 } else {
                     const { data: publicUrlData } = supabase.storage.from('media').getPublicUrl(fileName);
                     
@@ -169,7 +166,7 @@ async function processMessageCommand(message) {
                            .update({ status: 'SUDAH_KIRIM_FOTO' })
                            .eq('id', customer.id);
                     }
-                    console.log(`✅ Foto aman di database dari customer ${phoneNumber}`);
+                    console.log(`Ô£à Foto aman di database dari customer ${phoneNumber}`);
                 }
             }
         }
@@ -190,12 +187,12 @@ client.on('ready', async () => {
     qrCodeData = '';
     isConnected = true;
 
-    // KASUS DARURAT: Menyisir ulang riwayat 1 HARI TERAKHIR saja (agar tidak berat seperti 4 hari).
-    // Ini menggaransi jika VPS sempat mati (atau restart code), pesan yg masuk selama VPS mati akan tetap tersedot.
+    // [KOREKSI FATAL 3]: FITUR SINKRONISASI 4 HARI TERAKHIR (Bukan cuma yang unread)
     try {
         console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR...');
         const chats = await client.getChats();
         
+        // Buat batas waktu 1 hari ke belakang (lebih ringan dari 4 hari)
         const targetDate = new Date();
         targetDate.setDate(targetDate.getDate() - 1);
         const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
@@ -205,16 +202,16 @@ client.on('ready', async () => {
             if (!chat.isGroup) {
                 const historyMessages = await chat.fetchMessages({ limit: 100 });
                 for (const msg of historyMessages) {
-                    if (msg.timestamp >= limitTimestamp) {
+                    if (!msg.fromMe && msg.timestamp >= limitTimestamp) {
                         processedCount++;
                         await processMessageCommand(msg);
                     }
                 }
             }
         }
-        console.log(`✅ Selesai menyisir dan menarik kembali ${processedCount} kepingan pesan dari masa lalu (1 Hari).`);
+        console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal dari 1 hari terakhir.`);
     } catch (e) {
-         console.error('⚠️ Gagal sinkronisasi pesan offline tertinggal:', e);
+         console.error('ÔÜá´©Å Gagal sinkronisasi pesan offline:', e);
     }
 });
 
@@ -223,14 +220,7 @@ client.on('disconnected', (reason) => {
     isConnected = false;
 });
 
-// =====================================================================
-// SATU LISTENER - SATU JALUR - TIDAK ADA PENUMPUKAN
-// message_create adalah event yang komprehensif dari whatsapp-web.js
-// Ia menangkap SEMUA pesan: masuk dari customer & keluar dari HP kita
-// Dokumentasi: https://docs.wwebjs.dev/Client.html#event:message_create
-// =====================================================================
-client.on('message_create', async (message) => {
-    console.log(`📨 EVENT [message_create] - from:${message.from} to:${message.to} fromMe:${message.fromMe} type:${message.type}`);
+client.on('message', async (message) => {
     await processMessageCommand(message);
 });
 
@@ -250,62 +240,25 @@ app.post('/api/wa/send', async (req, res) => {
     
     try {
         const chatId = phone_number + '@c.us';
-        const sentMsg = await client.sendMessage(chatId, message);
+        await client.sendMessage(chatId, message);
 
-        // ARSITEKTUR BERSIH:
-        // event 'message_create' di atas akan otomatis menangkap pesan keluar ini
-        // dan memprosesnya lewat processMessageCommand — TIDAK PERLU insert manual lagi
-        //
-        // Kecuali: jika customer_id dikirim dan pesan punya wa_id valid, kita update urutan inbox saja
         if (customer_id) {
-            await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
+           const { error: insErr } = await supabase.from('messages').insert({
+               customer_id: customer_id,
+               body: message,
+               is_from_me: true,
+               created_at: new Date().toISOString()
+           });
+
+           if (!insErr) {
+               // Sundul ke atas Inbox setelah Vercel kirim balasan
+               await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
+           } else {
+               console.error('❌ DB insert gagal saat balas Vercel:', insErr);
+           }
         }
-        
-        console.log(`✉️ Pesan berhasil dikirim ke ${phone_number} dari Vercel`);
         res.json({ success: true, message: 'Sent' });
     } catch (err) {
-        console.error('❌ Gagal kirim pesan:', err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-// Endpoint Gali Ulang (Resync 1 Customer)
-app.post('/api/wa/resync', async (req, res) => {
-    const { phone_number, customer_id } = req.body;
-    if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
-    if (!customer_id || !phone_number) return res.status(400).json({ error: 'Missing customer_id or phone_number' });
-
-    try {
-        console.log(`\n🧹 GALI ULANG DIMULAI untuk pelanggan ${phone_number}...`);
-        
-        // 1. Sapu bersih Database
-        await supabase.from('media').delete().eq('customer_id', customer_id);
-        await supabase.from('messages').delete().eq('customer_id', customer_id);
-
-        // 2. Sapu bersih file fisik dari Storage Browser
-        const { data: files } = await supabase.storage.from('media').list(customer_id);
-        if (files && files.length > 0) {
-            const filePaths = files.map(f => `${customer_id}/${f.name}`);
-            await supabase.storage.from('media').remove(filePaths);
-            console.log(`🗑️ Berhasil menghapus ${filePaths.length} file usang dari Supabase Storage`);
-        }
-
-        // 3. Tarik nafas panjang dan copy paste 1000 history bersih
-        const chatId = phone_number + '@c.us';
-        const chat = await client.getChatById(chatId);
-        const historyMessages = await chat.fetchMessages({ limit: 1000 });
-        
-        console.log(`🔄 Menarik ulang secara akurat ${historyMessages.length} kepingan riwayat pesan...`);
-        let pulledCount = 0;
-        for (const msg of historyMessages) {
-             pulledCount++;
-             await processMessageCommand(msg);
-        }
-
-        console.log(`✅ GALI ULANG SUKSES untuk ${phone_number}. Total disedot murni: ${pulledCount} pesan.\n`);
-        res.json({ success: true, message: `Resync ${pulledCount} pesan sukses` });
-    } catch (err) {
-        console.error('❌ Gagal Re-sync:', err);
         res.status(500).json({ error: err.message });
     }
 });
