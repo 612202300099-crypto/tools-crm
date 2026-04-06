@@ -32,7 +32,11 @@ async function processMessageCommand(message) {
         const chat = await message.getChat();
         if (chat.isGroup) return; 
         
-        const phoneNumber = message.fromMe ? message.to.replace('@c.us', '') : message.from.replace('@c.us', '');
+        let rawNumber = message.fromMe ? message.to : message.from;
+        // TOLAK MENTAH-MENTAH PESAN INTERNAL MULTI-DEVICE / @LID BUGS
+        if (rawNumber.includes('@lid') || rawNumber.includes('@broadcast')) return; 
+        
+        const phoneNumber = rawNumber.replace(/@c\.us|@s\.whatsapp\.net/g, '');
 
         let { data: customer, error: customerError } = await supabase
             .from('customers')
