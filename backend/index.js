@@ -55,10 +55,20 @@ async function processMessageCommand(message) {
                 .select()
                 .single();
 
-            if (createError) throw createError;
-            customer = newCustomer;
-
-            // Mode Siluman: Jangan balas pesan otomatis "Halo kak". Posisikan bot sebagai penyedot pasif.
+            if (createError) {
+                if (createError.code === '23505') {
+                    // KASUS 1: Race Condition! Pelanggan barusan di-create oleh proses paralel WA. Tarik ulang datanya!
+                    const { data: retryCustomer } = await supabase.from('customers').select('*').eq('phone_number', phoneNumber).single();
+                    customer = retryCustomer;
+                } else {
+                    throw createError;
+                }
+            } else {
+                customer = newCustomer;
+            }
+        } else {
+            // KASUS 3: Pelanggan sudah ada, WAJIB UPDATE waktu tabel `customers` agar namanya Sundul teratas di Inbox Vercel!
+            await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer.id);
         }
 
         // KODE PELACAK INTERNAL WA (SANGAT UNIK PER FOTO)
@@ -227,8 +237,12 @@ app.post('/api/wa/send', async (req, res) => {
                wa_id: sentMsg.id._serialized,
                body: message,
                is_from_me: true,
-               created_at: new Date(sentMsg.timestamp * 1000).toISOString()
+               // KASUS 2: Sediakan jam independen jika server WA mengembalikan timestamp kosong (NaN)
+               created_at: sentMsg.timestamp ? new Date(sentMsg.timestamp * 1000).toISOString() : new Date().toISOString()
            });
+           
+           // KASUS 3: Sesudah menekan tombol Send Vercel, kita juga wajib memaksa Inbox menyundul nama ke urutan 1
+           await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
         }
         
         res.json({ success: true, message: 'Sent' });
