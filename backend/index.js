@@ -190,8 +190,32 @@ client.on('ready', async () => {
     qrCodeData = '';
     isConnected = true;
 
-    // Sinkronisasi 4 Hari dihapus per-permintaan agar bot menyala lebih cepat.
-    // Jika ada chat yang terlewat saat bot mati, gunakan tombol "Gali Ulang" di Vercel.
+    // KASUS DARURAT: Menyisir ulang riwayat 1 HARI TERAKHIR saja (agar tidak berat seperti 4 hari).
+    // Ini menggaransi jika VPS sempat mati (atau restart code), pesan yg masuk selama VPS mati akan tetap tersedot.
+    try {
+        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR...');
+        const chats = await client.getChats();
+        
+        const targetDate = new Date();
+        targetDate.setDate(targetDate.getDate() - 1);
+        const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
+        
+        let processedCount = 0;
+        for (const chat of chats) {
+            if (!chat.isGroup) {
+                const historyMessages = await chat.fetchMessages({ limit: 100 });
+                for (const msg of historyMessages) {
+                    if (msg.timestamp >= limitTimestamp) {
+                        processedCount++;
+                        await processMessageCommand(msg);
+                    }
+                }
+            }
+        }
+        console.log(`✅ Selesai menyisir dan menarik kembali ${processedCount} kepingan pesan dari masa lalu (1 Hari).`);
+    } catch (e) {
+         console.error('⚠️ Gagal sinkronisasi pesan offline tertinggal:', e);
+    }
 });
 
 client.on('disconnected', (reason) => {
@@ -232,14 +256,18 @@ app.post('/api/wa/send', async (req, res) => {
         // Langsung suntikkan ke DB saat tombol Vercel ditekan dan rekam WA_ID presisi
         // Agar real-time UI langsung muncul dan mencegah duplicate dari 'message_create'
         if (customer_id && sentMsg && sentMsg.id && sentMsg.id._serialized) {
-           await supabase.from('messages').insert({
+           const { error: insErr } = await supabase.from('messages').insert({
                customer_id: customer_id,
                wa_id: sentMsg.id._serialized,
                body: message,
                is_from_me: true,
-               // KASUS 2: Sediakan jam independen jika server WA mengembalikan timestamp kosong (NaN)
                created_at: sentMsg.timestamp ? new Date(sentMsg.timestamp * 1000).toISOString() : new Date().toISOString()
            });
+           
+           if (insErr) {
+               console.error("Gagal nyuntik DB Vercel:", insErr);
+               throw new Error("Pesan terkirim ke WA, tapi gagal disimpan ke Riwayat Vercel (DB Error)");
+           }
            
            // KASUS 3: Sesudah menekan tombol Send Vercel, kita juga wajib memaksa Inbox menyundul nama ke urutan 1
            await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
