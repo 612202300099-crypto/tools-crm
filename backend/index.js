@@ -187,12 +187,12 @@ client.on('ready', async () => {
     qrCodeData = '';
     isConnected = true;
 
-    // [KOREKSI FATAL 3]: FITUR SINKRONISASI 4 HARI TERAKHIR (Bukan cuma yang unread)
+    // [STARTUP SYNC]: Menyedot pesan yang masuk selama VPS mati (max 1 hari ke belakang)
+    // Limit 1000 per chat untuk memastikan tidak ada foto yang tertinggal
     try {
-        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR...');
+        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR (limit 1000/chat)...');
         const chats = await client.getChats();
         
-        // Buat batas waktu 1 hari ke belakang (lebih ringan dari 4 hari)
         const targetDate = new Date();
         targetDate.setDate(targetDate.getDate() - 1);
         const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
@@ -200,7 +200,8 @@ client.on('ready', async () => {
         let processedCount = 0;
         for (const chat of chats) {
             if (!chat.isGroup) {
-                const historyMessages = await chat.fetchMessages({ limit: 100 });
+                // Limit 1000 agar tidak ada foto barbar yang tertinggal (termasuk customer yang kirim 100+ foto)
+                const historyMessages = await chat.fetchMessages({ limit: 1000 });
                 for (const msg of historyMessages) {
                     if (!msg.fromMe && msg.timestamp >= limitTimestamp) {
                         processedCount++;
