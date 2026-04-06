@@ -223,16 +223,15 @@ client.on('disconnected', (reason) => {
     isConnected = false;
 });
 
-client.on('message', async (message) => {
-    // Telinga Kanan: Khusus menangkap pesan MASUK murni
-    await processMessageCommand(message);
-});
-
+// =====================================================================
+// SATU LISTENER - SATU JALUR - TIDAK ADA PENUMPUKAN
+// message_create adalah event yang komprehensif dari whatsapp-web.js
+// Ia menangkap SEMUA pesan: masuk dari customer & keluar dari HP kita
+// Dokumentasi: https://docs.wwebjs.dev/Client.html#event:message_create
+// =====================================================================
 client.on('message_create', async (message) => {
-    // Telinga Kiri: Khusus sadap pesan KELUAR (Balasan manual dari fisik HP/WA Web)
-    if (message.fromMe) {
-        await processMessageCommand(message);
-    }
+    console.log(`📨 EVENT [message_create] - from:${message.from} to:${message.to} fromMe:${message.fromMe} type:${message.type}`);
+    await processMessageCommand(message);
 });
 
 client.initialize();
@@ -253,28 +252,19 @@ app.post('/api/wa/send', async (req, res) => {
         const chatId = phone_number + '@c.us';
         const sentMsg = await client.sendMessage(chatId, message);
 
-        // Langsung suntikkan ke DB saat tombol Vercel ditekan dan rekam WA_ID presisi
-        // Agar real-time UI langsung muncul dan mencegah duplicate dari 'message_create'
-        if (customer_id && sentMsg && sentMsg.id && sentMsg.id._serialized) {
-           const { error: insErr } = await supabase.from('messages').insert({
-               customer_id: customer_id,
-               wa_id: sentMsg.id._serialized,
-               body: message,
-               is_from_me: true,
-               created_at: sentMsg.timestamp ? new Date(sentMsg.timestamp * 1000).toISOString() : new Date().toISOString()
-           });
-           
-           if (insErr) {
-               console.error("Gagal nyuntik DB Vercel:", insErr);
-               throw new Error("Pesan terkirim ke WA, tapi gagal disimpan ke Riwayat Vercel (DB Error)");
-           }
-           
-           // KASUS 3: Sesudah menekan tombol Send Vercel, kita juga wajib memaksa Inbox menyundul nama ke urutan 1
-           await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
+        // ARSITEKTUR BERSIH:
+        // event 'message_create' di atas akan otomatis menangkap pesan keluar ini
+        // dan memprosesnya lewat processMessageCommand — TIDAK PERLU insert manual lagi
+        //
+        // Kecuali: jika customer_id dikirim dan pesan punya wa_id valid, kita update urutan inbox saja
+        if (customer_id) {
+            await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
         }
         
+        console.log(`✉️ Pesan berhasil dikirim ke ${phone_number} dari Vercel`);
         res.json({ success: true, message: 'Sent' });
     } catch (err) {
+        console.error('❌ Gagal kirim pesan:', err);
         res.status(500).json({ error: err.message });
     }
 });
