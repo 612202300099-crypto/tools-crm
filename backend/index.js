@@ -32,8 +32,7 @@ async function processMessageCommand(message) {
         const chat = await message.getChat();
         if (chat.isGroup) return; 
         
-        const contact = await message.getContact();
-        const phoneNumber = contact.number;
+        const phoneNumber = message.fromMe ? message.to.replace('@c.us', '') : message.from.replace('@c.us', '');
 
         let { data: customer, error: customerError } = await supabase
             .from('customers')
@@ -46,7 +45,7 @@ async function processMessageCommand(message) {
                 .from('customers')
                 .insert({
                     phone_number: phoneNumber,
-                    name: contact.pushname || 'Pelanggan Baru',
+                    name: 'Pelanggan ' + phoneNumber,
                     status: 'BELUM_KIRIM_FOTO'
                 })
                 .select()
@@ -102,7 +101,7 @@ async function processMessageCommand(message) {
                     customer_id: customer.id,
                     wa_id: waMessageId,
                     body: message.body || '[Attachment Dokumen/Gambar]',
-                    is_from_me: false,
+                    is_from_me: message.fromMe,
                     created_at: msgTimestamp
                 })
                 .select()
@@ -194,7 +193,7 @@ client.on('ready', async () => {
                 const historyMessages = await chat.fetchMessages({ limit: 1000 });
                 // Proses satu persatu pesan masuk yg masih masuk rentang 4 hari
                 for (const msg of historyMessages) {
-                    if (!msg.fromMe && msg.timestamp >= limitTimestamp) {
+                    if (msg.timestamp >= limitTimestamp) {
                         processedCount++;
                         await processMessageCommand(msg);
                     }
@@ -216,7 +215,8 @@ client.on('disconnected', (reason) => {
     isConnected = false;
 });
 
-client.on('message', async (message) => {
+client.on('message_create', async (message) => {
+    // Menangkap pesan masuk MAUPUN pesan keluar (Biar balasan dari HP masuk Vercel)
     await processMessageCommand(message);
 });
 
@@ -238,15 +238,52 @@ app.post('/api/wa/send', async (req, res) => {
         const chatId = phone_number + '@c.us';
         await client.sendMessage(chatId, message);
 
-        if (customer_id) {
-           await supabase.from('messages').insert({
-               customer_id: customer_id,
-               body: message,
-               is_from_me: true
-           });
-        }
+        // [Koreksi]: Insert ke database dihapus dari sini karena event 'message_create' 
+        // akan otomatis menangkap pesan keluar dan memasukkannya ke DB tanpa double!
+        
         res.json({ success: true, message: 'Sent' });
     } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Endpoint Gali Ulang (Resync 1 Customer)
+app.post('/api/wa/resync', async (req, res) => {
+    const { phone_number, customer_id } = req.body;
+    if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
+    if (!customer_id || !phone_number) return res.status(400).json({ error: 'Missing customer_id or phone_number' });
+
+    try {
+        console.log(`\n🧹 GALI ULANG DIMULAI untuk pelanggan ${phone_number}...`);
+        
+        // 1. Sapu bersih Database
+        await supabase.from('media').delete().eq('customer_id', customer_id);
+        await supabase.from('messages').delete().eq('customer_id', customer_id);
+
+        // 2. Sapu bersih file fisik dari Storage Browser
+        const { data: files } = await supabase.storage.from('media').list(customer_id);
+        if (files && files.length > 0) {
+            const filePaths = files.map(f => `${customer_id}/${f.name}`);
+            await supabase.storage.from('media').remove(filePaths);
+            console.log(`🗑️ Berhasil menghapus ${filePaths.length} file usang dari Supabase Storage`);
+        }
+
+        // 3. Tarik nafas panjang dan copy paste 1000 history bersih
+        const chatId = phone_number + '@c.us';
+        const chat = await client.getChatById(chatId);
+        const historyMessages = await chat.fetchMessages({ limit: 1000 });
+        
+        console.log(`🔄 Menarik ulang secara akurat ${historyMessages.length} kepingan riwayat pesan...`);
+        let pulledCount = 0;
+        for (const msg of historyMessages) {
+             pulledCount++;
+             await processMessageCommand(msg);
+        }
+
+        console.log(`✅ GALI ULANG SUKSES untuk ${phone_number}. Total disedot murni: ${pulledCount} pesan.\n`);
+        res.json({ success: true, message: `Resync ${pulledCount} pesan sukses` });
+    } catch (err) {
+        console.error('❌ Gagal Re-sync:', err);
         res.status(500).json({ error: err.message });
     }
 });
