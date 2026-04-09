@@ -24,38 +24,45 @@ const client = new Client({
 });
 
 // CORE ENGINE HANDLER (Diekstrak agar bisa dipakai untuk pesan masuk realtime & sinkronisasi tertinggal)
-async function processMessageCommand(message) {
+async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
         if (message.from === 'status@broadcast' || message.isStatus) return;
         if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol') return;
         
         const chat = await message.getChat();
         if (chat.isGroup) return; 
+
+        // PENENTUAN NOMOR HP CUSTOMER (Bukan pengirim, tapi lawan bicaranya)
+        const isFromMe = message.fromMe;
+        const rawId = isFromMe ? message.to : message.from;
+
+        // Anti error Multi-device (:1) dan ID baru (@lid)
+        const customerPhoneNumber = rawId.split('@')[0].split(':')[0];
         
-        const contact = await message.getContact();
-        const phoneNumber = contact.number;
+        // Filter: Hanya proses nomor HP murni (digit), abaikan status, group, dll.
+        if (!/^\d+$/.test(customerPhoneNumber) || customerPhoneNumber.length < 5) return;
 
         let { data: customer, error: customerError } = await supabase
             .from('customers')
             .select('*')
-            .eq('phone_number', phoneNumber)
+            .eq('phone_number', customerPhoneNumber)
             .single();
 
         if (!customer) {
+            const contact = await message.getContact();
             const { data: newCustomer, error: createError } = await supabase
                 .from('customers')
                 .insert({
-                    phone_number: phoneNumber,
-                    name: contact.pushname || 'Pelanggan Baru',
+                    phone_number: customerPhoneNumber,
+                    name: (isFromMe ? 'Pelanggan Baru' : (contact.pushname || 'Pelanggan Baru')),
                     status: 'BELUM_KIRIM_FOTO'
                 })
                 .select()
                 .single();
 
             if (createError) {
-                // Anti Race Condition: jika nomor ini baru saja dibuat oleh proses paralel
                 if (createError.code === '23505') {
-                    const { data: existing } = await supabase.from('customers').select('*').eq('phone_number', phoneNumber).single();
+                    const { data: existing } = await supabase.from('customers').select('*').eq('phone_number', customerPhoneNumber).single();
                     customer = existing;
                 } else {
                     throw createError;
@@ -63,8 +70,8 @@ async function processMessageCommand(message) {
             } else {
                 customer = newCustomer;
             }
-        } else {
-            // Pelanggan sudah ada — sundul ke atas di Inbox
+        } else if (!skipCustomerUpdate) {
+            // Pelanggan sudah ada — sundul ke atas di Inbox (Hanya jika bukan saat resync massal)
             await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer.id);
         }
 
@@ -90,9 +97,9 @@ async function processMessageCommand(message) {
         }
 
         if (isDuplicate) {
-            if (!message.hasMedia) return; // Abaikan 100% jika teks biasa.
+            if (!message.hasMedia) return; 
             
-            // Healing Media Jika RLS Kemarin Menghambat Fotonya.
+            // HEALING MODE: Cek apakah media sudah benar-benar ada di tabel media?
             const { data: secureMedia } = await supabase
                 .from('media')
                 .select('id')
@@ -100,19 +107,17 @@ async function processMessageCommand(message) {
                 .limit(1);
             
             if (secureMedia && secureMedia.length > 0) {
-                 return; // Aman.
+                 return; // Sudah lengkap, skip.
             }
-            console.log('­ƒ®╣ Menyembuhkan Media yang gagal Upload gara-gara RLS tempo hari...');
+            console.log(`🩹 HEALING: Menambal media yang hilang untuk pesan ${waMessageId}`);
         } else {
-            // Rekap pesan text / default yang benar-benar baru
-            // FITUR BARU: Memaksa rekaman jangkar WA_ID di tabel messages!
             const { data: msgData, error: msgError } = await supabase
                 .from('messages')
                 .insert({
                     customer_id: customer.id,
                     wa_id: waMessageId,
-                    body: message.body || '[Attachment Dokumen/Gambar]',
-                    is_from_me: false,
+                    body: message.body || (message.hasMedia ? '[Attachment Dokumen/Gambar]' : ''),
+                    is_from_me: isFromMe,
                     created_at: msgTimestamp
                 })
                 .select()
@@ -121,11 +126,11 @@ async function processMessageCommand(message) {
         }
 
         if (message.hasMedia) {
-            console.log(`­ƒôÑ Mengunduh media dari ${phoneNumber}...`);
+            console.log(`📥 Mengunduh media dari ${customerPhoneNumber}...`);
             const media = await message.downloadMedia();
             
             if (!media || !media.data) {
-                console.log(`ÔÜá´©Å Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${phoneNumber}`);
+                console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
                 return;
             }
 
@@ -146,7 +151,7 @@ async function processMessageCommand(message) {
                     });
 
                 if (uploadError) {
-                    console.error('ÔØî GAGAL UPLOAD STORAGE:', uploadError.message);
+                    console.error('❌ GAGAL UPLOAD STORAGE:', uploadError.message);
                 } else {
                     const { data: publicUrlData } = supabase.storage.from('media').getPublicUrl(fileName);
                     
@@ -166,7 +171,7 @@ async function processMessageCommand(message) {
                            .update({ status: 'SUDAH_KIRIM_FOTO' })
                            .eq('id', customer.id);
                     }
-                    console.log(`Ô£à Foto aman di database dari customer ${phoneNumber}`);
+                    console.log(`✅ Foto aman di database dari customer ${customerPhoneNumber}`);
                 }
             }
         }
@@ -187,8 +192,7 @@ client.on('ready', async () => {
     qrCodeData = '';
     isConnected = true;
 
-    // [STARTUP SYNC]: Menyedot pesan yang masuk selama VPS mati (max 1 hari ke belakang)
-    // Limit 1000 per chat untuk memastikan tidak ada foto yang tertinggal
+    // [STARTUP SYNC]
     try {
         console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR (limit 1000/chat)...');
         const chats = await client.getChats();
@@ -200,19 +204,18 @@ client.on('ready', async () => {
         let processedCount = 0;
         for (const chat of chats) {
             if (!chat.isGroup) {
-                // Limit 1000 agar tidak ada foto barbar yang tertinggal (termasuk customer yang kirim 100+ foto)
                 const historyMessages = await chat.fetchMessages({ limit: 1000 });
                 for (const msg of historyMessages) {
-                    if (!msg.fromMe && msg.timestamp >= limitTimestamp) {
+                    if (msg.timestamp >= limitTimestamp) {
                         processedCount++;
-                        await processMessageCommand(msg);
+                        await processMessageCommand(msg, true);
                     }
                 }
             }
         }
-        console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal dari 1 hari terakhir.`);
+        console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal.`);
     } catch (e) {
-         console.error('ÔÜá´©Å Gagal sinkronisasi pesan offline:', e);
+         console.error('⚠️ Gagal sinkronisasi pesan offline:', e);
     }
 });
 
@@ -221,7 +224,8 @@ client.on('disconnected', (reason) => {
     isConnected = false;
 });
 
-client.on('message', async (message) => {
+// Gunakan message_create agar menangkap pesan dari kita juga (yang dikirim lewat HP)
+client.on('message_create', async (message) => {
     await processMessageCommand(message);
 });
 
@@ -252,10 +256,7 @@ app.post('/api/wa/send', async (req, res) => {
            });
 
            if (!insErr) {
-               // Sundul ke atas Inbox setelah Vercel kirim balasan
                await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
-           } else {
-               console.error('❌ DB insert gagal saat balas Vercel:', insErr);
            }
         }
         res.json({ success: true, message: 'Sent' });
@@ -264,7 +265,38 @@ app.post('/api/wa/send', async (req, res) => {
     }
 });
 
+app.post('/api/wa/resync', async (req, res) => {
+    const { phone_number, customer_id } = req.body;
+    if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
+    
+    try {
+        const chatId = phone_number + '@c.us';
+        const chat = await client.getChatById(chatId);
+        
+        console.log(`[RESYNC - SAFE MODE] Memulai penyisiran ulang history untuk: ${phone_number}`);
+        // KOREKSI: Kita TIDAK LAGI MENGHAPUS data lama. 
+        // Logika processMessageCommand sudah otomatis melakukan 'Healing' (menambah yang kurang, skip yang sudah ada).
+        // Ini mencegah resiko chat hilang jika koneksi terputus di tengah jalan.
+
+        console.log(`[RESYNC] Mendownload ulang history 1000 pesan terakhir...`);
+        const historyMessages = await chat.fetchMessages({ limit: 1000 });
+        
+        let count = 0;
+        for (const msg of historyMessages) {
+            await processMessageCommand(msg, true);
+            count++;
+        }
+        
+        console.log(`[RESYNC] Selesai! Berhasil menyisir ${count} pesan.`);
+        res.json({ success: true, processed: count });
+    } catch (err) {
+        console.error('[RESYNC ERROR]:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Backend WA Engine running on port ${PORT}`);
 });
+
