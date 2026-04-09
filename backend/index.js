@@ -32,15 +32,24 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         const chat = await message.getChat();
         if (chat.isGroup) return; 
 
-        // PENENTUAN NOMOR HP CUSTOMER (Bukan pengirim, tapi lawan bicaranya)
+        // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli, bukan LID.
         const isFromMe = message.fromMe;
-        const rawId = isFromMe ? message.to : message.from;
-
-        // Anti error Multi-device (:1) dan ID baru (@lid)
-        const customerPhoneNumber = rawId.split('@')[0].split(':')[0];
+        let customerPhoneNumber = chat.id.user; // Fallback
+        let contactPushname = 'Pelanggan Baru';
         
-        // Filter: Hanya proses nomor HP murni (digit), abaikan status, group, dll.
-        if (!/^\d+$/.test(customerPhoneNumber) || customerPhoneNumber.length < 5) return;
+        try {
+            // Dapatkan info kontak dari ruang chat (selalu info customer, entah kita yang kirim atau mereka)
+            const contact = await chat.getContact();
+            if (contact) {
+                if (contact.number) customerPhoneNumber = contact.number;
+                if (contact.pushname) contactPushname = contact.pushname;
+            }
+        } catch (err) {
+            console.error('⚠️ Gagal mendapatkan contact asli, menggunakan fallback ID.');
+        }
+
+        // Filter: Hanya proses jika valid
+        if (!customerPhoneNumber || !/^\d+$/.test(customerPhoneNumber) || customerPhoneNumber.length < 5) return;
 
         let { data: customer, error: customerError } = await supabase
             .from('customers')
@@ -49,19 +58,11 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             .single();
 
         if (!customer) {
-            let contactName = 'Pelanggan Baru';
-            try {
-                const contact = await message.getContact();
-                if (contact && contact.pushname) contactName = contact.pushname;
-            } catch (pErr) {
-                console.error('⚠️ Gagal mengambil nama kontak (WWebJS Error), menggunakan default.');
-            }
-
             const { data: newCustomer, error: createError } = await supabase
                 .from('customers')
                 .insert({
                     phone_number: customerPhoneNumber,
-                    name: (isFromMe ? 'Pelanggan Baru' : contactName),
+                    name: contactPushname,
                     status: 'BELUM_KIRIM_FOTO'
                 })
                 .select()
