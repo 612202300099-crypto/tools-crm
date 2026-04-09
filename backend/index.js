@@ -49,12 +49,19 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             .single();
 
         if (!customer) {
-            const contact = await message.getContact();
+            let contactName = 'Pelanggan Baru';
+            try {
+                const contact = await message.getContact();
+                if (contact && contact.pushname) contactName = contact.pushname;
+            } catch (pErr) {
+                console.error('⚠️ Gagal mengambil nama kontak (WWebJS Error), menggunakan default.');
+            }
+
             const { data: newCustomer, error: createError } = await supabase
                 .from('customers')
                 .insert({
                     phone_number: customerPhoneNumber,
-                    name: (isFromMe ? 'Pelanggan Baru' : (contact.pushname || 'Pelanggan Baru')),
+                    name: (isFromMe ? 'Pelanggan Baru' : contactName),
                     status: 'BELUM_KIRIM_FOTO'
                 })
                 .select()
