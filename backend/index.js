@@ -201,6 +201,7 @@ client.on('ready', async () => {
 
     // [STARTUP SYNC]
     try {
+        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
         console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR (limit 1000/chat)...');
         const chats = await client.getChats();
         
@@ -211,18 +212,24 @@ client.on('ready', async () => {
         let processedCount = 0;
         for (const chat of chats) {
             if (!chat.isGroup) {
-                const historyMessages = await chat.fetchMessages({ limit: 1000 });
-                for (const msg of historyMessages) {
-                    if (msg.timestamp >= limitTimestamp) {
-                        processedCount++;
-                        await processMessageCommand(msg, true);
+                try {
+                    // Beri jeda 1 detik tiap chat agar WA Web tidak hang (mencegah error waitForChatLoading)
+                    await sleep(1000);
+                    const historyMessages = await chat.fetchMessages({ limit: 1000 });
+                    for (const msg of historyMessages) {
+                        if (msg.timestamp >= limitTimestamp) {
+                            processedCount++;
+                            await processMessageCommand(msg, true);
+                        }
                     }
+                } catch (chatErr) {
+                    console.error(`⚠️ Gagal menyisir chat ${chat.id.user}:`, chatErr.message);
                 }
             }
         }
         console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal.`);
     } catch (e) {
-         console.error('⚠️ Gagal sinkronisasi pesan offline:', e);
+         console.error('⚠️ Gagal total sinkronisasi pesan offline:', e);
     }
 });
 
