@@ -202,7 +202,7 @@ client.on('ready', async () => {
     // [STARTUP SYNC]
     try {
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR (limit 1000/chat)...');
+        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR (limit 50/chat)...');
         const chats = await client.getChats();
         
         const targetDate = new Date();
@@ -213,9 +213,9 @@ client.on('ready', async () => {
         for (const chat of chats) {
             if (!chat.isGroup) {
                 try {
-                    // Beri jeda 1 detik tiap chat agar WA Web tidak hang (mencegah error waitForChatLoading)
-                    await sleep(1000);
-                    const historyMessages = await chat.fetchMessages({ limit: 1000 });
+                    // Beri jeda 2 detik tiap chat agar WA Web tidak hang (mencegah error waitForChatLoading)
+                    await sleep(2000);
+                    const historyMessages = await chat.fetchMessages({ limit: 50 });
                     for (const msg of historyMessages) {
                         if (msg.timestamp >= limitTimestamp) {
                             processedCount++;
