@@ -6,6 +6,8 @@ const qrcode = require('qrcode-terminal');
 const { createClient } = require('@supabase/supabase-js');
 const fs = require('fs');
 const path = require('path');
+const cron = require('node-cron');
+const cleanupService = require('./services/cleanup_service');
 
 const app = express();
 app.use(cors());
@@ -383,5 +385,11 @@ app.post('/api/wa/resync', async (req, res) => {
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Backend WA Engine running on port ${PORT}`);
+    
+    // THE JANITOR: Menjalankan skrip bersih-bersih tepat setiap Pukul 02:00 Pagi.
+    cron.schedule('0 2 * * *', () => {
+        cleanupService();
+    });
+    console.log('🧹 The Janitor (Auto-Cleanup) dijadwalkan setiap jam 02:00 pagi.');
 });
 
