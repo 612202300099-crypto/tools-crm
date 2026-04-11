@@ -4,10 +4,18 @@ const cors = require('cors');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { createClient } = require('@supabase/supabase-js');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Setup URL Publik untuk menayangkan Foto dari VPS
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com';
+
+// Servis file static dari VPS
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
@@ -26,6 +34,30 @@ const client = new Client({
 // CORE ENGINE HANDLER (Diekstrak agar bisa dipakai untuk pesan masuk realtime & sinkronisasi tertinggal)
 async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
+        // Jika mendeteksi pesan yang sudah dihapus/ditarik (dari history sync)
+        if (message.type === 'revoked') {
+            const waMessageId = message.id._serialized;
+            const { data: dbMsg } = await supabase.from('messages').select('id').eq('wa_id', waMessageId).single();
+            if (dbMsg) {
+                console.log(`🗑️ [Sinkronisasi] Mendeteksi pesan ditarik. Menghapus dari web...`);
+                
+                // Menghapus foto fisik dari VPS lokal
+                const { data: mediaData } = await supabase.from('media').select('file_name').eq('message_id', dbMsg.id);
+                if (mediaData && mediaData.length > 0) {
+                    for (const m of mediaData) {
+                        const filePath = path.join(__dirname, 'uploads', m.file_name);
+                        if (fs.existsSync(filePath)) {
+                            fs.unlinkSync(filePath);
+                        }
+                    }
+                }
+
+                await supabase.from('media').delete().eq('message_id', dbMsg.id);
+                await supabase.from('messages').delete().eq('id', dbMsg.id);
+            }
+            return;
+        }
+
         if (message.from === 'status@broadcast' || message.isStatus) return;
         if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol') return;
         
@@ -151,24 +183,26 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                 
                 const fileName = `${customer.id}/foto-${uniqueSuffix}.${ext}`;
 
-                const { data: uploadData, error: uploadError } = await supabase.storage
-                    .from('media')
-                    .upload(fileName, buffer, {
-                        contentType: media.mimetype || 'image/jpeg',
-                        upsert: false
-                    });
-
-                if (uploadError) {
-                    console.error('❌ GAGAL UPLOAD STORAGE:', uploadError.message);
-                } else {
-                    const { data: publicUrlData } = supabase.storage.from('media').getPublicUrl(fileName);
+                try {
+                    // Buat folder jika belum ada (Berdasarkan ID Customer)
+                    const uploadsDir = path.join(__dirname, 'uploads', customer.id.toString());
+                    if (!fs.existsSync(uploadsDir)) {
+                        fs.mkdirSync(uploadsDir, { recursive: true });
+                    }
                     
+                    // Simpan file ke hardisk VPS langsung (Sangat Cepat & Tanpa Timeout)
+                    const filePath = path.join(__dirname, 'uploads', fileName);
+                    fs.writeFileSync(filePath, buffer);
+
+                    // Buat link publik untuk diakses frontend
+                    const publicUrl = `${PUBLIC_API_URL}/uploads/${fileName}`;
+
                     await supabase
                         .from('media')
                         .insert({
                             customer_id: customer.id,
                             message_id: messageRecord ? messageRecord.id : null,
-                            file_url: publicUrlData.publicUrl,
+                            file_url: publicUrl,
                             file_name: fileName,
                             created_at: msgTimestamp
                         });
@@ -179,7 +213,9 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                            .update({ status: 'SUDAH_KIRIM_FOTO' })
                            .eq('id', customer.id);
                     }
-                    console.log(`✅ Foto aman di database dari customer ${customerPhoneNumber}`);
+                    console.log(`✅ Foto tersimpan di LOKAL VPS dari customer ${customerPhoneNumber}`);
+                } catch (uploadError) {
+                    console.error('❌ GAGAL MENYIMPAN FOTO KE VPS:', uploadError.message);
                 }
             }
         }
@@ -242,6 +278,40 @@ client.on('disconnected', (reason) => {
 // Gunakan message_create agar menangkap pesan dari kita juga (yang dikirim lewat HP)
 client.on('message_create', async (message) => {
     await processMessageCommand(message);
+});
+
+// Menangkap event Penghapusan Pesan (Tarik Pesan) secara Real-time
+client.on('message_revoke_everyone', async (after, before) => {
+    try {
+        if(!after) return;
+        const waMessageId = after.id._serialized;
+        console.log(`🗑️ Pesan ditarik oleh pengirim (Revoked). Menghapus data: ${waMessageId}`);
+        
+        const { data: dbMsg } = await supabase
+            .from('messages')
+            .select('id')
+            .eq('wa_id', waMessageId)
+            .single();
+
+        if (dbMsg) {
+            // Menghapus media fisik dari server agar disk VPS tidak penuh
+            const { data: mediaData } = await supabase.from('media').select('file_name').eq('message_id', dbMsg.id);
+            if (mediaData && mediaData.length > 0) {
+                for (const m of mediaData) {
+                    const filePath = path.join(__dirname, 'uploads', m.file_name);
+                    if (fs.existsSync(filePath)) {
+                        fs.unlinkSync(filePath);
+                    }
+                }
+            }
+
+            await supabase.from('media').delete().eq('message_id', dbMsg.id);
+            await supabase.from('messages').delete().eq('id', dbMsg.id);
+            console.log(`✅ File foto & pesan sukses dihapus dari web & disk VPS karena ditarik.`);
+        }
+    } catch (e) {
+        console.error('⚠️ Error menghapus pesan ditarik:', e.message);
+    }
 });
 
 client.initialize();

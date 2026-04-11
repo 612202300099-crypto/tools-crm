@@ -5,3 +5,5 @@ out/
 .env.local
 .wwebjs_auth/
 .wwebjs_cache/
+uploads/
+backend/uploads/
