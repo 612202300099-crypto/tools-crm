@@ -38,11 +38,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
         
-        // [SHIELD LEVEL 1] Buang mentah-mentah jika ini murni dari LID / Sistem agar tidak merusak DB
-        if (message.from && message.from.includes('@lid')) {
-             console.log(`[DEBUG] 🛡️ Ditolak di Shield 1 (message.from LID)`);
-             return;
-        }
+        // Kita tidak boleh memblokir `message.from` berbasis @lid secara absolut di sini 
+        // karena pesan OUTGOING (dari HP sendiri) seringkali di-sync oleh WA menggunakan LID host.
         
         let chat;
         try {
@@ -52,25 +49,21 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         }
 
         if (chat.isGroup) {
-             console.log(`[DEBUG] 🛡️ Ditolak (Chat adalah Grup)`);
+             // Sembunyikan log grup agar tidak spam
              return;
         }
-        if (chat.id && chat.id.server === 'lid') {
-             console.log(`[DEBUG] 🛡️ Ditolak (Server LID)`);
-             return;
-        }
-        if (chat.id && chat.id._serialized && chat.id._serialized.includes('@lid')) {
-             console.log(`[DEBUG] 🛡️ Ditolak (Serialized LID)`);
-             return;
+
+        let isLidNetwork = false;
+        if (chat.id && (chat.id.server === 'lid' || chat.id._serialized.includes('@lid'))) {
+             // Jangan langsung ditolak! Kita akan usahakan me-resolve No HP aslinya dari contact!
+             isLidNetwork = true;
         }
 
         // [SHIELD LEVEL 2] Blokir System Messages (Status/Broadcast)
         if (message.from === 'status@broadcast' || message.isStatus) {
-             console.log(`[DEBUG] 🛡️ Ditolak (Status Broadcast)`);
              return;
         }
         if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol' || message.type === 'broadcast_list') {
-             console.log(`[DEBUG] 🛡️ Ditolak (System Message Type: ${message.type})`);
              return;
         }
 
@@ -82,24 +75,26 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         try {
             const contact = await chat.getContact();
             if (contact) {
-                if (contact.number) customerPhoneNumber = contact.number;
+                if (contact.number) customerPhoneNumber = String(contact.number).replace(/\D/g, ''); // Prioritas: Resolusi HP Asli
                 if (contact.pushname) contactPushname = contact.pushname;
             }
         } catch (err) {
-             console.error("Gagal getContact (Fallback ID berjalan)", err.message);
+             console.error("[DEBUG] Gagal getContact (Fallback berlajan)", err.message);
         }
 
-        // Pastikan hanya angka (Buang +, spasi, dash)
-        if (customerPhoneNumber) customerPhoneNumber = String(customerPhoneNumber).replace(/\D/g, '');
-        console.log(`[DEBUG] 🔍 Cleaned Phone: ${customerPhoneNumber}`);
+        if (!customerPhoneNumber) customerPhoneNumber = String(chat.id.user).replace(/\D/g, ''); // Fallback string regex aman
+        console.log(`[DEBUG] 🔍 Resolved Phone Number: ${customerPhoneNumber} (LID Network: ${isLidNetwork})`);
 
         // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
-        if (!customerPhoneNumber) {
-             console.log(`🛡️ [SYSTEM GUARD] Menolak karena nomor HP kosong.`);
+        if (!customerPhoneNumber || customerPhoneNumber.length < 10) {
+             console.log(`[DEBUG] 🛡️ Menolak karena nomor HP tidak valid/kosong.`);
              return;
         }
-        if (customerPhoneNumber.length < 10 || customerPhoneNumber.length > 15) {
-             console.log(`🛡️ [SYSTEM GUARD] Menolak anomali nomor HP (diduga sistem LID / anomali): ${customerPhoneNumber}`);
+        
+        // PENTING: Jika nomor >= 15 digit (sangat panjang seperti 182996376277186) DAN asalnya dari jaringan LID,
+        // Ini berarti kita GAGAL mendapatkan nomor HP aslinya. Kita tolak agar tidak jadi Customer Siluman!
+        if (customerPhoneNumber.length >= 15 && isLidNetwork) {
+             console.log(`[DEBUG] 🛑 [BLOCK] Mencegah penciptaan Data Customer Siluman dari ID Panjang Asli: ${customerPhoneNumber}`);
              return;
         }
 
