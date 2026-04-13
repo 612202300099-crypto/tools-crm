@@ -36,8 +36,13 @@ const client = new Client({
 // CORE ENGINE HANDLER (Diekstrak agar bisa dipakai untuk pesan masuk realtime & sinkronisasi tertinggal)
 async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
+        console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
+        
         // [SHIELD LEVEL 1] Buang mentah-mentah jika ini murni dari LID / Sistem agar tidak merusak DB
-        if (message.from && message.from.includes('@lid')) return;
+        if (message.from && message.from.includes('@lid')) {
+             console.log(`[DEBUG] 🛡️ Ditolak di Shield 1 (message.from LID)`);
+             return;
+        }
         
         let chat;
         try {
@@ -46,13 +51,28 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             return; // Gagalkan jika chat tidak ada wujudnya
         }
 
-        if (chat.isGroup) return;
-        if (chat.id && chat.id.server === 'lid') return;
-        if (chat.id && chat.id._serialized && chat.id._serialized.includes('@lid')) return;
+        if (chat.isGroup) {
+             console.log(`[DEBUG] 🛡️ Ditolak (Chat adalah Grup)`);
+             return;
+        }
+        if (chat.id && chat.id.server === 'lid') {
+             console.log(`[DEBUG] 🛡️ Ditolak (Server LID)`);
+             return;
+        }
+        if (chat.id && chat.id._serialized && chat.id._serialized.includes('@lid')) {
+             console.log(`[DEBUG] 🛡️ Ditolak (Serialized LID)`);
+             return;
+        }
 
         // [SHIELD LEVEL 2] Blokir System Messages (Status/Broadcast)
-        if (message.from === 'status@broadcast' || message.isStatus) return;
-        if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol' || message.type === 'broadcast_list') return;
+        if (message.from === 'status@broadcast' || message.isStatus) {
+             console.log(`[DEBUG] 🛡️ Ditolak (Status Broadcast)`);
+             return;
+        }
+        if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol' || message.type === 'broadcast_list') {
+             console.log(`[DEBUG] 🛡️ Ditolak (System Message Type: ${message.type})`);
+             return;
+        }
 
         // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli
         const isFromMe = message.fromMe;
@@ -70,7 +90,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         }
 
         // Pastikan hanya angka (Buang +, spasi, dash)
-        if (customerPhoneNumber) customerPhoneNumber = customerPhoneNumber.replace(/\D/g, '');
+        if (customerPhoneNumber) customerPhoneNumber = String(customerPhoneNumber).replace(/\D/g, '');
+        console.log(`[DEBUG] 🔍 Cleaned Phone: ${customerPhoneNumber}`);
 
         // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
         if (!customerPhoneNumber) {
@@ -123,6 +144,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             .single();
 
         if (!customer) {
+            console.log(`[DEBUG] 🆕 Menciptakan customer baru di DB...`);
             const { data: newCustomer, error: createError } = await supabase
                 .from('customers')
                 .insert({
@@ -134,6 +156,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                 .single();
 
             if (createError) {
+                console.log(`[DEBUG] ⚠️ Gagal create customer:`, createError);
                 if (createError.code === '23505') {
                     const { data: existing } = await supabase.from('customers').select('*').eq('phone_number', customerPhoneNumber).single();
                     customer = existing;
@@ -147,6 +170,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             // Pelanggan sudah ada — sundul ke atas di Inbox (Hanya jika bukan saat resync massal)
             await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer.id);
         }
+        
+        console.log(`[DEBUG] 📬 Lolos! Memasukkan ke tabel messages (Duplicate Check run...)`);
 
         // KODE PELACAK INTERNAL WA (SANGAT UNIK PER FOTO)
         const waMessageId = message.id._serialized;
