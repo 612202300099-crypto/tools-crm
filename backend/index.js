@@ -66,13 +66,19 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                 if (contact.pushname) contactPushname = contact.pushname;
             }
         } catch (err) {
-             // fallback silent
+             console.error("Gagal getContact (Fallback ID berjalan)", err.message);
         }
 
+        // Pastikan hanya angka (Buang +, spasi, dash)
+        if (customerPhoneNumber) customerPhoneNumber = customerPhoneNumber.replace(/\D/g, '');
+
         // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
-        if (!customerPhoneNumber || !/^\d+$/.test(customerPhoneNumber)) return;
+        if (!customerPhoneNumber) {
+             console.log(`🛡️ [SYSTEM GUARD] Menolak karena nomor HP kosong.`);
+             return;
+        }
         if (customerPhoneNumber.length < 10 || customerPhoneNumber.length > 15) {
-             console.log(`🛡️ [SYSTEM GUARD] Menolak anomali nomor HP (diduga sistem LID): ${customerPhoneNumber}`);
+             console.log(`🛡️ [SYSTEM GUARD] Menolak anomali nomor HP (diduga sistem LID / anomali): ${customerPhoneNumber}`);
              return;
         }
 
@@ -184,14 +190,18 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                 .insert({
                     customer_id: customer.id,
                     wa_id: waMessageId,
-                    message_hash: secureMessageHash, // NEW: Field constraint
+                    message_hash: secureMessageHash, 
                     body: message.body || (message.hasMedia ? '[Attachment Dokumen/Gambar]' : ''),
                     is_from_me: isFromMe,
                     created_at: msgTimestamp
                 })
                 .select()
                 .single();
-            if(!msgError) messageRecord = msgData;
+            if(!msgError) {
+                messageRecord = msgData;
+            } else {
+                console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message, msgError.details);
+            }
         }
 
         if (message.hasMedia) {
