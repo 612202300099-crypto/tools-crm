@@ -36,56 +36,79 @@ const client = new Client({
 // CORE ENGINE HANDLER (Diekstrak agar bisa dipakai untuk pesan masuk realtime & sinkronisasi tertinggal)
 async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
-        // Jika mendeteksi pesan yang sudah dihapus/ditarik (dari history sync)
-        if (message.type === 'revoked') {
-            const waMessageId = message.id._serialized;
-            const shortId = message.id.id || waMessageId.split('_').pop();
-            const { data: dbMsg } = await supabase.from('messages').select('id').eq('message_hash', shortId).single();
-            if (dbMsg) {
-                console.log(`🗑️ [Sinkronisasi] Mendeteksi pesan ditarik. Menjalankan 3-Layer Sinkronisasi...`);
-                
-                // LAYER 2: Menghapus foto fisik dari VPS lokal & Database Media (Hard Delete)
-                const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
-                if (mediaData && mediaData.length > 0) {
-                    for (const m of mediaData) {
-                        const filePath = path.join(__dirname, 'uploads', m.file_name);
-                        if (fs.existsSync(filePath)) {
-                            fs.unlinkSync(filePath);
-                        }
-                        await supabase.from('media').delete().eq('id', m.id);
-                    }
-                }
-
-                // LAYER 1: Soft Delete pesan di tabel
-                await supabase.from('messages').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', dbMsg.id);
-            }
-            return;
+        // [SHIELD LEVEL 1] Buang mentah-mentah jika ini murni dari LID / Sistem agar tidak merusak DB
+        if (message.from && message.from.includes('@lid')) return;
+        
+        let chat;
+        try {
+            chat = await message.getChat();
+        } catch (e) {
+            return; // Gagalkan jika chat tidak ada wujudnya
         }
 
-        if (message.from === 'status@broadcast' || message.isStatus) return;
-        if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol') return;
-        
-        const chat = await message.getChat();
-        if (chat.isGroup) return; 
+        if (chat.isGroup) return;
+        if (chat.id && chat.id.server === 'lid') return;
+        if (chat.id && chat.id._serialized && chat.id._serialized.includes('@lid')) return;
 
-        // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli, bukan LID.
+        // [SHIELD LEVEL 2] Blokir System Messages (Status/Broadcast)
+        if (message.from === 'status@broadcast' || message.isStatus) return;
+        if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol' || message.type === 'broadcast_list') return;
+
+        // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli
         const isFromMe = message.fromMe;
-        let customerPhoneNumber = chat.id.user; // Fallback
+        let customerPhoneNumber = chat.id.user; // Fallback "628xxx" (tanpa @c.us)
         let contactPushname = 'Pelanggan Baru';
         
         try {
-            // Dapatkan info kontak dari ruang chat (selalu info customer, entah kita yang kirim atau mereka)
             const contact = await chat.getContact();
             if (contact) {
                 if (contact.number) customerPhoneNumber = contact.number;
                 if (contact.pushname) contactPushname = contact.pushname;
             }
         } catch (err) {
-            console.error('⚠️ Gagal mendapatkan contact asli, menggunakan fallback ID.');
+             // fallback silent
         }
 
-        // Filter: Hanya proses jika valid
-        if (!customerPhoneNumber || !/^\d+$/.test(customerPhoneNumber) || customerPhoneNumber.length < 5) return;
+        // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
+        if (!customerPhoneNumber || !/^\d+$/.test(customerPhoneNumber)) return;
+        if (customerPhoneNumber.length < 10 || customerPhoneNumber.length > 15) {
+             console.log(`🛡️ [SYSTEM GUARD] Menolak anomali nomor HP (diduga sistem LID): ${customerPhoneNumber}`);
+             return;
+        }
+
+        // [HISTORY REVOKE SAFE-MODE] Jika sinkronisasi menangkap riwayat pesan ditarik (Poin 2)
+        if (message.type === 'revoked') {
+            let targetHash = null;
+            if (message._data && message._data.protocolMessageKey && message._data.protocolMessageKey.id) {
+                targetHash = message._data.protocolMessageKey.id;
+            } else if (message.id && message.id.id) {
+                targetHash = message.id.id; 
+            }
+
+            if (!targetHash) {
+                 console.log("⚠️ [HISTORY REVOKE FAIL-SAFE] Referensi ID asli hilang. Pembatalan diblokir untuk keamanan.");
+                 return;
+            }
+
+            const { data: dbMsg } = await supabase.from('messages').select('id, is_deleted, customer_id').eq('message_hash', targetHash).single();
+            if (dbMsg) {
+                if (dbMsg.is_deleted) return; // Idempotent check
+                console.log(`🗑️ [HISTORY REVOKE] Menjalankan 3-Layer Sinkronisasi pada Hash: ${targetHash}...`);
+                
+                // LAYER 2: Menghapus foto fisik dari VPS lokal (Non-Blocking) & Database Media
+                const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
+                if (mediaData && mediaData.length > 0) {
+                    for (const m of mediaData) {
+                        const filePath = path.join(__dirname, 'uploads', m.file_name);
+                        await fs.promises.unlink(filePath).catch(e => { /* silent skip */ });
+                        await supabase.from('media').delete().eq('id', m.id);
+                    }
+                }
+                // LAYER 1: Soft Delete pesan di tabel
+                await supabase.from('messages').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', dbMsg.id);
+            }
+            return;
+        }
 
         let { data: customer, error: customerError } = await supabase
             .from('customers')
@@ -290,42 +313,79 @@ client.on('message_create', async (message) => {
 client.on('message_revoke_everyone', async (after, before) => {
     try {
         if(!after) return;
-        const waMessageId = after.id._serialized;
-        const shortId = after.id.id || waMessageId.split('_').pop();
-        console.log(`🗑️ Pesan ditarik (Revoke). Mencari Hash Unik Poin 2: ${shortId}`);
         
-        // Poin 1 & 2: Match berdasarkan Hash Ekor tanpa ILIKE (Secure)
+        // Poin 2: Wajib Referensi Asli (Jangan menebak hash baru!)
+        let targetHash = null;
+        if (before && before.id && before.id.id) {
+             targetHash = before.id.id; // Kebenaran 1: Memori WA Asli
+        } else if (after._data && after._data.protocolMessageKey && after._data.protocolMessageKey.id) {
+             targetHash = after._data.protocolMessageKey.id; // Kebenaran 2: Raw Protocol Storage
+        }
+
+        if (!targetHash) {
+             console.log(`⚠️ [REVOKE GUARD SKIP] Referensi ID Target asli kosong (Protocol ID: ${after.id._serialized}). Mencegah Salah Hapus.`);
+             return;
+        }
+
+        console.log(`ℹ️ [REVOKE EVENT] Mencari Hash Pesan Asli (SOT): ${targetHash}...`);
+        
+        // Poin 1 & 4: Pencarian dan Idempotent Lock
         const { data: dbMsg } = await supabase
             .from('messages')
-            .select('id, customer_id')
-            .eq('message_hash', shortId)
+            .select('id, customer_id, is_deleted')
+            .eq('message_hash', targetHash)
             .single();
 
-        if (dbMsg) {
-            // LAYER 2: Hapus File VPS. LAYER 3: Hapus DB Media (Hard Delete) agar Realtime Frontend menangkap 'DELETE' event
-            const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
-            if (mediaData && mediaData.length > 0) {
-                for (const m of mediaData) {
-                    const filePath = path.join(__dirname, 'uploads', m.file_name);
-                    if (fs.existsSync(filePath)) {
-                        fs.unlinkSync(filePath);
-                    }
-                    await supabase.from('media').delete().eq('id', m.id);
+        if (!dbMsg) {
+             console.log(`❌ [REVOKE GAGAL] Pesan Hash ${targetHash} tidak ditemukan dalam penyimpanan DB.`);
+             return;
+        }
+
+        if (dbMsg.is_deleted) {
+             console.log(`⏭️ [REVOKE SKIP] Idempotent: Pesan Hash ${targetHash} sudah pernah ditandai terhapus.`);
+             return;
+        }
+
+        // Poin 1 Lanjutan: Validasi Ruang Obrolan
+        try {
+            const chat = await after.getChat();
+            if (chat) {
+                let checkPhone = chat.id.user;
+                const contact = await chat.getContact();
+                if (contact && contact.number) checkPhone = contact.number;
+                
+                const { data: custInfo } = await supabase.from('customers').select('id').eq('phone_number', checkPhone).single();
+                if (custInfo && custInfo.id !== dbMsg.customer_id) {
+                     console.log(`⛔ [FATAL SHIELD] Batal menghapus ${targetHash}! Kepemilikan (Customer ID) bentrok (Anti-Salah-Hapus).`);
+                     return;
                 }
             }
-
-            // LAYER 1: Terakhir, Soft Delete tabel messages agar memicu UPDATE event di realtime frontend Poin 3
-            await supabase.from('messages').update({
-                 is_deleted: true,
-                 deleted_at: new Date().toISOString()
-            }).eq('id', dbMsg.id);
-
-            console.log(`✅ [Sinkronisasi 3 Layer Berhasil] Pesan Hash ${shortId} di-Soft Delete, UI dan Fisik Media Hangus.`);
-        } else {
-             console.log(`⚠️ Gagal menemukan data pesan untuk direvoke dengan Hash: ${shortId}`);
+        } catch (e) {
+             // Jika protokol tak bisa dilacak chat-nya, abaikan verifikasi ini dan percaya pada spesifikasi Hash Unik.
+             console.log(`ℹ️ [REVOKE INFO] Tidak dapat memverifikasi pengirim via chat protocol, tapi Hash Unik dikonfirmasi valid.`);
         }
+
+        // LAYER 2: Hapus File VPS Asinkronus Non-Blocking (Poin 2). LAYER 3: Hapus DB Media
+        const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
+        if (mediaData && mediaData.length > 0) {
+            for (const m of mediaData) {
+                const filePath = path.join(__dirname, 'uploads', m.file_name);
+                await fs.promises.unlink(filePath).catch(e => {
+                     console.log(`ℹ️ Media fisik ${m.file_name} sudah tidak di memori VPS.`); 
+                });
+                await supabase.from('media').delete().eq('id', m.id);
+            }
+        }
+
+        // LAYER 1: Terakhir, Soft Delete tabel messages
+        await supabase.from('messages').update({
+             is_deleted: true,
+             deleted_at: new Date().toISOString()
+        }).eq('id', dbMsg.id);
+
+        console.log(`✅ [3-LAYER SYNC SUCCESS] Pesan Asli (Hash: ${targetHash}) resmi Lenyap & Soft-Deleted secara aman!`);
     } catch (e) {
-        console.error('⚠️ Error memproses pesan ditarik:', e.message);
+        console.error('⚠️ Error Fatal memproses pesan Real-time Tarik (Revoke):', e.message);
     }
 });
 

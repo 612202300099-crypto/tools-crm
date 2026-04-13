@@ -112,7 +112,7 @@ export default function ChatDetail() {
   };
 
   const handleResync = async () => {
-    const confirmAsk = window.confirm("PERINGATAN: Ini akan menghapus seluruh rekaman chat dan foto pelanggan ini di Web, lalu mencoba menarik kembali 1.000 pesan terakhirnya secara utuh dari WhatsApp HP Anda. Lanjutkan?");
+    const confirmAsk = window.confirm("Perintah ini akan secara AMAN mengunggah (UPSERT) ulang riwayat pesan WA ke Web tanpa satupun menghapus data Anda saat ini. Cocok untuk menambal pesan/foto yang tersendat. Lanjutkan?");
     if (!confirmAsk) return;
     
     setIsResyncing(true);
