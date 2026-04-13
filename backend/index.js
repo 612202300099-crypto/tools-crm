@@ -39,23 +39,25 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         // Jika mendeteksi pesan yang sudah dihapus/ditarik (dari history sync)
         if (message.type === 'revoked') {
             const waMessageId = message.id._serialized;
-            const { data: dbMsg } = await supabase.from('messages').select('id').eq('wa_id', waMessageId).single();
+            const shortId = message.id.id || waMessageId.split('_').pop();
+            const { data: dbMsg } = await supabase.from('messages').select('id').eq('message_hash', shortId).single();
             if (dbMsg) {
-                console.log(`🗑️ [Sinkronisasi] Mendeteksi pesan ditarik. Menghapus dari web...`);
+                console.log(`🗑️ [Sinkronisasi] Mendeteksi pesan ditarik. Menjalankan 3-Layer Sinkronisasi...`);
                 
-                // Menghapus foto fisik dari VPS lokal
-                const { data: mediaData } = await supabase.from('media').select('file_name').eq('message_id', dbMsg.id);
+                // LAYER 2: Menghapus foto fisik dari VPS lokal & Database Media (Hard Delete)
+                const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
                 if (mediaData && mediaData.length > 0) {
                     for (const m of mediaData) {
                         const filePath = path.join(__dirname, 'uploads', m.file_name);
                         if (fs.existsSync(filePath)) {
                             fs.unlinkSync(filePath);
                         }
+                        await supabase.from('media').delete().eq('id', m.id);
                     }
                 }
 
-                await supabase.from('media').delete().eq('message_id', dbMsg.id);
-                await supabase.from('messages').delete().eq('id', dbMsg.id);
+                // LAYER 1: Soft Delete pesan di tabel
+                await supabase.from('messages').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', dbMsg.id);
             }
             return;
         }
@@ -120,8 +122,9 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         // KODE PELACAK INTERNAL WA (SANGAT UNIK PER FOTO)
         const waMessageId = message.id._serialized;
         const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
+        const secureMessageHash = message.id.id || waMessageId.split('_').pop();
 
-        // 0. ANTI-DUPLIKAT (Cek Kesamaan Kode KTP WA_ID Asli)
+        // 0. ANTI-DUPLIKAT (Cek Kesamaan Kode KTP WA_ID Asli menggunakan Constraint Hash Lintas Prefix)
         let isDuplicate = false;
         let messageRecord = null;
 
@@ -129,7 +132,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             const { data: duplicate } = await supabase
                 .from('messages')
                 .select('id')
-                .eq('wa_id', waMessageId) 
+                .eq('message_hash', secureMessageHash) 
                 .limit(1);
 
             if (duplicate && duplicate.length > 0) {
@@ -158,6 +161,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                 .insert({
                     customer_id: customer.id,
                     wa_id: waMessageId,
+                    message_hash: secureMessageHash, // NEW: Field constraint
                     body: message.body || (message.hasMedia ? '[Attachment Dokumen/Gambar]' : ''),
                     is_from_me: isFromMe,
                     created_at: msgTimestamp
@@ -287,32 +291,41 @@ client.on('message_revoke_everyone', async (after, before) => {
     try {
         if(!after) return;
         const waMessageId = after.id._serialized;
-        console.log(`🗑️ Pesan ditarik oleh pengirim (Revoked). Menghapus data: ${waMessageId}`);
+        const shortId = after.id.id || waMessageId.split('_').pop();
+        console.log(`🗑️ Pesan ditarik (Revoke). Mencari Hash Unik Poin 2: ${shortId}`);
         
+        // Poin 1 & 2: Match berdasarkan Hash Ekor tanpa ILIKE (Secure)
         const { data: dbMsg } = await supabase
             .from('messages')
-            .select('id')
-            .eq('wa_id', waMessageId)
+            .select('id, customer_id')
+            .eq('message_hash', shortId)
             .single();
 
         if (dbMsg) {
-            // Menghapus media fisik dari server agar disk VPS tidak penuh
-            const { data: mediaData } = await supabase.from('media').select('file_name').eq('message_id', dbMsg.id);
+            // LAYER 2: Hapus File VPS. LAYER 3: Hapus DB Media (Hard Delete) agar Realtime Frontend menangkap 'DELETE' event
+            const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
             if (mediaData && mediaData.length > 0) {
                 for (const m of mediaData) {
                     const filePath = path.join(__dirname, 'uploads', m.file_name);
                     if (fs.existsSync(filePath)) {
                         fs.unlinkSync(filePath);
                     }
+                    await supabase.from('media').delete().eq('id', m.id);
                 }
             }
 
-            await supabase.from('media').delete().eq('message_id', dbMsg.id);
-            await supabase.from('messages').delete().eq('id', dbMsg.id);
-            console.log(`✅ File foto & pesan sukses dihapus dari web & disk VPS karena ditarik.`);
+            // LAYER 1: Terakhir, Soft Delete tabel messages agar memicu UPDATE event di realtime frontend Poin 3
+            await supabase.from('messages').update({
+                 is_deleted: true,
+                 deleted_at: new Date().toISOString()
+            }).eq('id', dbMsg.id);
+
+            console.log(`✅ [Sinkronisasi 3 Layer Berhasil] Pesan Hash ${shortId} di-Soft Delete, UI dan Fisik Media Hangus.`);
+        } else {
+             console.log(`⚠️ Gagal menemukan data pesan untuk direvoke dengan Hash: ${shortId}`);
         }
     } catch (e) {
-        console.error('⚠️ Error menghapus pesan ditarik:', e.message);
+        console.error('⚠️ Error memproses pesan ditarik:', e.message);
     }
 });
 

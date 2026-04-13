@@ -14,6 +14,7 @@ type Message = {
   body: string;
   is_from_me: boolean;
   created_at: string;
+  is_deleted?: boolean;
 };
 
 type Media = {
@@ -49,11 +50,23 @@ export default function ChatDetail() {
 
     const channel = supabase
       .channel(`chat_${customerId}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `customer_id=eq.${customerId}` }, payload => {
-         setMessages(prev => [...prev, payload.new as Message]);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages', filter: `customer_id=eq.${customerId}` }, payload => {
+         if (payload.eventType === 'INSERT') {
+             setMessages(prev => [...prev, payload.new as Message]);
+         } else if (payload.eventType === 'UPDATE') {
+             const updated = payload.new as Message;
+             setMessages(prev => prev.map(m => m.id === updated.id ? updated : m));
+         } else if (payload.eventType === 'DELETE') {
+             setMessages(prev => prev.filter(m => m.id !== payload.old.id));
+         }
       })
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'media', filter: `customer_id=eq.${customerId}` }, payload => {
-         setMediaList(prev => [...prev, payload.new as Media]);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'media', filter: `customer_id=eq.${customerId}` }, payload => {
+         // Susun media baru di paling atas karena urutan tabel media adalah descending
+         if (payload.eventType === 'INSERT') {
+             setMediaList(prev => [payload.new as Media, ...prev]);
+         } else if (payload.eventType === 'DELETE') {
+             setMediaList(prev => prev.filter(m => m.id !== payload.old.id));
+         }
       })
       .subscribe();
 
@@ -247,11 +260,12 @@ export default function ChatDetail() {
           <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
             {messages.map(msg => (
               <div key={msg.id} className={clsx(
-                "p-3 max-w-[85%] rounded-2xl text-sm shadow-sm leading-relaxed",
-                msg.is_from_me ? "bg-indigo-600 text-white ml-auto rounded-tr-sm" 
-                               : "bg-white text-gray-800 border mr-auto rounded-tl-sm"
+                "p-3 max-w-[85%] rounded-2xl text-sm shadow-sm leading-relaxed transition-all duration-300",
+                msg.is_deleted ? "bg-gray-100 text-gray-500 italic opacity-80 border border-gray-200" :
+                (msg.is_from_me ? "bg-indigo-600 text-white" : "bg-white text-gray-800 border"),
+                msg.is_from_me ? "ml-auto rounded-tr-sm" : "mr-auto rounded-tl-sm"
               )}>
-                {msg.body}
+                {msg.is_deleted ? "🚫 Pesan ini telah dihapus oleh pengirim." : msg.body}
               </div>
             ))}
           </div>
