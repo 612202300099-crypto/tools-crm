@@ -32,6 +32,9 @@ function DashboardInboxContent() {
 
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
+  
+  // Poin 5: State penyimpan rentang aktif untuk filter lokal data realtime
+  const [activeDateRange, setActiveDateRange] = useState<{start: Date|null, end: Date|null}>({start: null, end: null});
 
   // Initializing state from URL safely
   const initSearch = searchParams.get("search") || "";
@@ -61,11 +64,16 @@ function DashboardInboxContent() {
       router.push(`${pathname}${query}`);
   }, [pathname, router, searchParams]);
 
+  // Poin 1 & 7: Manual Fetch diatur secara spesifik. Akan panggil spinner saat initial load dan filter diganti.
   const fetchCustomers = useCallback(async () => {
     setLoading(true);
     
-    // SERVER-SIDE FILTERING SCALABILITY
-    let query = supabase.from("customers").select("*").order("created_at", { ascending: false });
+    // Poin 6: Optimasi Server (Tingkatkan Skalabilitas Performa)
+    let query = supabase
+      .from("customers")
+      .select("id, phone_number, name, order_id, status, is_valid, created_at")
+      .order("created_at", { ascending: false })
+      .limit(1000); // Failsafe memory
 
     let rangeStart: Date | null = null;
     let rangeEnd: Date | null = null;
@@ -88,6 +96,9 @@ function DashboardInboxContent() {
         rangeStart = startOfDay(new Date(customStart));
         rangeEnd = endOfDay(new Date(customEnd));
     }
+    
+    // Simpan acuan tanggal untuk filter payload Realtime
+    setActiveDateRange({ start: rangeStart, end: rangeEnd });
 
     if (rangeStart && rangeEnd) {
         // toISOString automatically converts the local boundary to UTC format which Supabase reads correctly
@@ -100,17 +111,36 @@ function DashboardInboxContent() {
     setLoading(false);
   }, [dateFilter, customStart, customEnd]);
 
+  // Poin 4.A: useEffect 1 - Hanya ter-trigger spesifik saat referensi fetchCustomers berubah (Filter diubah user).
   useEffect(() => {
     fetchCustomers();
-    
-    // Subscribe to realtime changes
+  }, [fetchCustomers]);
+
+  // Poin 4.B & Poin 2: useEffect 2 - Subscribe tunggal, TANPA TRIGGER LOAD, Inject local mutation.
+  useEffect(() => {
     const channel = supabase
-      .channel('public:customers')
+      .channel('customers_realtime_db')
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'customers' },
-        () => {
-          fetchCustomers();
+        (payload) => {
+          setCustomers(prev => {
+             // Operasi efisien, React akan mem-batch re-renders saat payload membludak (Poin 3 implicitly di-handle UI tree)
+             if (payload.eventType === 'DELETE') {
+                 return prev.filter(c => c.id !== payload.old.id);
+             }
+
+             const newCust = payload.new as Customer;
+             const exists = prev.some(c => c.id === newCust.id);
+             
+             if (exists) {
+                 // Replace (Update) baris spesifik tanpa mempengaruiurutan
+                 return prev.map(c => c.id === newCust.id ? newCust : c);
+             } else {
+                 // Prepend (Insert) di posisi ter-atas
+                 return [newCust, ...prev];
+             }
+          });
         }
       )
       .subscribe();
@@ -118,10 +148,19 @@ function DashboardInboxContent() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [fetchCustomers]);
+  }, []); // Array Dependensi Kosong: Mengunci re-subscribe! Tidak peduli filter berubah berapapun!
 
   // Logika Pencarian & Filter Lokal (Hanya Teks & Status yang di filter lokal agar sangat cepat)
   const filteredCustomers = customers.filter(c => {
+     // Poin 5: Validasi Data Siluman dari Realtime!
+     // Guard: Apabila ada Insert tapi ternyata tgl tidak sesuai filter aktif, Sembunyikan.
+     if (activeDateRange.start && activeDateRange.end) {
+         const cDate = new Date(c.created_at);
+         if (cDate < activeDateRange.start || cDate > activeDateRange.end) {
+             return false;
+         }
+     }
+
      const q = searchQuery.toLowerCase();
      const matchesSearch = 
         c.phone_number.includes(q) || 
