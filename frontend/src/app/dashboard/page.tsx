@@ -5,7 +5,7 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
 import { format, startOfDay, endOfDay, subDays, startOfMonth, endOfMonth } from "date-fns";
-import { Search, Filter, Calendar } from "lucide-react";
+import { Search, Filter, Calendar, Trash2 } from "lucide-react";
 
 type Customer = {
   id: string;
@@ -32,6 +32,10 @@ function DashboardInboxContent() {
 
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
+  
+  // Fitur Penghapusan Massal
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
   
   // Poin 5: State penyimpan rentang aktif untuk filter lokal data realtime
   const [activeDateRange, setActiveDateRange] = useState<{start: Date|null, end: Date|null}>({start: null, end: null});
@@ -200,6 +204,35 @@ function DashboardInboxContent() {
     }
   };
 
+  const handleMassDelete = async () => {
+    const arrIds = Array.from(selectedIds);
+    if (arrIds.length === 0) return;
+    
+    const isConfirmed = window.confirm(`PERINGATAN KERAS! Anda yakin akan menghapus permanen ${arrIds.length} pelanggan ini?\n\n- Seluruh Folder File VPS akan dihapus bersih.\n- Seluruh riwayat DB (customers, messages, media) tuntas dilebur.\nAksi ini bersifat Final dan Tidak Dapat Dikembalikan. Lanjutkan?`);
+    if (!isConfirmed) return;
+
+    setIsDeleting(true);
+    try {
+        const waUrl = "https://api-wa.parecustom.com"; // API Production
+        const res = await fetch(`${waUrl}/api/wa/delete-chats`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ customer_ids: arrIds })
+        });
+        
+        if (!res.ok) throw new Error("Gagal mengeksekusi penghapusan di Server");
+        const { count } = await res.json();
+        
+        alert(`SUKSES: ${count} Pelanggan beserta seluruh foto aslinya di VPS telah dimusnahkan secara aman & terisolasi.`);
+        setSelectedIds(new Set());
+        fetchCustomers(); // Refresh daftar setelah hapus sukses
+    } catch (err: any) {
+        alert("Terjadi Error Sistem Coretan: " + err.message);
+    } finally {
+        setIsDeleting(false);
+    }
+  };
+
   return (
     <div className="p-8 h-full flex flex-col bg-gray-50/50">
       <div className="flex justify-between items-end mb-6">
@@ -292,6 +325,21 @@ function DashboardInboxContent() {
           <table className="w-full text-left border-collapse">
             <thead className="bg-gray-50/80 border-b border-gray-200 sticky top-0 backdrop-blur-md z-10">
               <tr>
+                <th className="p-4 w-12 text-center border-r border-gray-100">
+                    <input 
+                      type="checkbox" 
+                      onClick={() => {
+                          if (selectedIds.size === filteredCustomers.length && filteredCustomers.length > 0) {
+                              setSelectedIds(new Set());
+                          } else {
+                              setSelectedIds(new Set(filteredCustomers.map(c => c.id)));
+                          }
+                      }} 
+                      checked={selectedIds.size === filteredCustomers.length && filteredCustomers.length > 0}
+                      onChange={() => {}}
+                      className="w-4 h-4 text-red-600 rounded focus:ring-red-500 cursor-pointer"
+                    />
+                </th>
                 <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Pelanggan</th>
                 <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Nomor Order</th>
                 <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Status Terbaru</th>
@@ -302,7 +350,7 @@ function DashboardInboxContent() {
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                    <td colSpan={5} className="p-16">
+                    <td colSpan={6} className="p-16">
                         <div className="flex flex-col items-center justify-center space-y-3">
                             <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
                             <div className="text-sm font-bold text-indigo-900 animate-pulse">Menarik data dari database...</div>
@@ -311,15 +359,29 @@ function DashboardInboxContent() {
                 </tr>
               ) : filteredCustomers.length === 0 ? (
                 <tr>
-                    <td colSpan={5} className="p-16 text-center">
+                    <td colSpan={6} className="p-16 text-center">
                         <div className="text-gray-400 mb-2">✨</div>
                         <div className="text-base font-bold text-gray-900">Tidak ada pesanan ditemukan</div>
                         <div className="text-sm font-medium text-gray-500 mt-1">Coba ubah kata kunci atau rentang tanggal Anda.</div>
                     </td>
                 </tr>
               ) : (
-                filteredCustomers.map((c) => (
-                  <tr key={c.id} className="hover:bg-indigo-50/30 transition duration-150 ease-in-out group">
+                filteredCustomers.map((c) => {
+                  const isChecked = selectedIds.has(c.id);
+                  return (
+                  <tr key={c.id} className={`hover:bg-indigo-50/30 transition duration-150 ease-in-out group ${isChecked ? 'bg-red-50/40' : ''}`}>
+                    <td className="p-4 text-center border-r border-gray-50/50">
+                        <input 
+                           type="checkbox" 
+                           checked={isChecked} 
+                           onChange={() => {
+                               const next = new Set(selectedIds);
+                               if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                               setSelectedIds(next);
+                           }} 
+                           className="w-4 h-4 text-red-600 rounded focus:ring-red-500 cursor-pointer" 
+                        />
+                    </td>
                     <td className="p-4">
                       <div className="font-extrabold text-gray-900 text-sm group-hover:text-indigo-900 transition-colors">{c.name || 'NN'}</div>
                       <div className="text-xs text-gray-500 font-mono mt-0.5 tracking-wide">{c.phone_number}</div>
@@ -339,7 +401,7 @@ function DashboardInboxContent() {
                       </Link>
                     </td>
                   </tr>
-                ))
+                )})
               )}
             </tbody>
           </table>
@@ -349,6 +411,31 @@ function DashboardInboxContent() {
             <span>Auto-Collage Secure CRM</span>
         </div>
       </div>
+      
+      {/* Tombol Hapus Melayang (Floating Action) */}
+      {selectedIds.size > 0 && (
+         <div className="fixed bottom-12 left-1/2 transform -translate-x-1/2 bg-white pl-6 pr-3 py-3 rounded-2xl shadow-[0_15px_40px_-5px_rgba(220,38,38,0.25)] border border-red-100 flex items-center space-x-6 z-[100] animate-in slide-in-from-bottom-8 duration-300">
+             <div className="font-bold text-gray-800 flex items-center">
+                 <span className="text-red-700 font-black px-2 py-0.5 bg-red-100/80 rounded-md mr-3">{selectedIds.size}</span>
+                 <span className="tracking-tight">Dipilih</span>
+             </div>
+             <button 
+                onClick={handleMassDelete} 
+                disabled={isDeleting} 
+                className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold shadow-md transition disabled:bg-red-400"
+             >
+                 {isDeleting ? (
+                    <span className="w-5 h-5 border-2 border-white border-t-red-400 rounded-full animate-spin"></span>
+                 ) : (
+                    <Trash2 size={18} />
+                 )}
+                 <span>{isDeleting ? "MEMUSNAHKAN..." : "Hapus Permanen"}</span>
+             </button>
+             <button onClick={() => setSelectedIds(new Set())} className="text-gray-400 hover:text-gray-600 transition p-2 hover:bg-gray-100 rounded-xl" title="Batalkan">
+                 ✕
+             </button>
+         </div>
+      )}
     </div>
   );
 }

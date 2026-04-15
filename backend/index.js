@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+const multer = require('multer');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const { createClient } = require('@supabase/supabase-js');
@@ -8,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 const cleanupService = require('./services/cleanup_service');
+const { checkAndRespond, invalidateConfigCache } = require('./services/ai_followup_service');
 
 const app = express();
 app.use(cors());
@@ -18,6 +20,27 @@ const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.
 
 // Servis file static dari VPS
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Setup Multer untuk upload gambar konfigurasi AI Bot
+const aiImageStorage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        const dir = path.join(__dirname, 'uploads', 'ai-config');
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+        const ext = path.extname(file.originalname);
+        cb(null, `order-example${ext}`);
+    }
+});
+const uploadAiImage = multer({
+    storage: aiImageStorage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // Max 5MB
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype.startsWith('image/')) cb(null, true);
+        else cb(new Error('Hanya file gambar yang diizinkan.'));
+    }
+});
 
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
@@ -278,6 +301,14 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                 }
             }
         }
+        // ─── AI FOLLOW-UP: Minta nomor pesanan jika belum ada ─────────────────
+        // Dipanggil SETELAH customer & pesan tersimpan ke DB, sebelum fungsi selesai.
+        // Hanya berjalan untuk pesan teks dari customer (bukan media, bukan fromMe)
+        if (!message.hasMedia && !isFromMe && customer) {
+            await checkAndRespond(client, customer, message, supabase);
+        }
+        // ───────────────────────────────────────────────────────────────────────
+
     } catch (error) {
         console.error('Terjadi error memproses pesan (Skip):', error);
     }
@@ -482,6 +513,119 @@ app.post('/api/wa/resync', async (req, res) => {
     } catch (err) {
         console.error('[RESYNC ERROR]:', err);
         res.status(500).json({ error: err.message });
+    }
+});
+
+app.post('/api/wa/delete-chats', async (req, res) => {
+    // API ini berjalan MURNI mengelola manipulasi File & Database (tidak perlu mengecek isConnected WA).
+    const { customer_ids } = req.body;
+    
+    if (!Array.isArray(customer_ids) || customer_ids.length === 0) {
+        return res.status(400).json({ error: 'Tidak ada ID Pelanggan yang dituju.' });
+    }
+
+    try {
+        console.log(`[DELETE-CHATS] Mengeksekusi pencucian data massal sejumlah: ${customer_ids.length} pelanggan...`);
+        let successfullyDeleted = 0;
+
+        for (const customerId of customer_ids) {
+             try {
+                 // FASE 1: Isolasi & Pemusnahan File Fisik Hardisk (Zero Leakage)
+                 const folderPath = path.join(__dirname, 'uploads', customerId.toString());
+                 if (fs.existsSync(folderPath)) {
+                      await fs.promises.rm(folderPath, { recursive: true, force: true }).catch(err => {
+                          // Toleransi apabila file memang sedang dikunci sistem operasi
+                          console.error(`⚠️ (Tertahan) Gagal wipe folder fisik ${customerId}:`, err.message);
+                      });
+                 }
+
+                 // FASE 2: Evakuasi Tabel Turunan
+                 await supabase.from('media').delete().eq('customer_id', customerId);
+                 await supabase.from('messages').delete().eq('customer_id', customerId);
+
+                 // FASE 3: Cabut Akar Utama
+                 await supabase.from('customers').delete().eq('id', customerId);
+                 
+                 successfullyDeleted++;
+             } catch (isolatedErr) {
+                 // Mencegah PM2 Crash: Error penghapusan 1 orang, tidak akan membatalkan yang lain
+                 console.error(`⚠️ [FAIL-SAFE] Skip penghapusan customer ${customerId} akibat error:`, isolatedErr.message);
+             }
+        }
+
+        console.log(`✅ [DELETE-CHATS] Operasi tuntas. Menghapus penuh ${successfullyDeleted} pelanggan.`);
+        return res.json({ success: true, count: successfullyDeleted });
+    } catch (fatalErr) {
+        console.error('❌ [DELETE-CHATS FATAL ERROR]:', fatalErr.message);
+        return res.status(500).json({ error: 'Terjadi kegagalan server internal.' });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════
+// ENDPOINT API: KONFIGURASI AI BOT
+// ═══════════════════════════════════════════════════════════
+
+// GET /api/ai/config — Ambil konfigurasi bot saat ini
+app.get('/api/ai/config', async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('ai_config')
+            .select('is_enabled, system_prompt, order_image_url')
+            .eq('id', 1)
+            .single();
+
+        if (error) throw error;
+        res.json({ success: true, config: data });
+    } catch (err) {
+        res.status(500).json({ error: 'Gagal membaca konfigurasi AI: ' + err.message });
+    }
+});
+
+// POST /api/ai/config — Update toggle ON/OFF dan system prompt
+app.post('/api/ai/config', async (req, res) => {
+    const { is_enabled, system_prompt } = req.body;
+    try {
+        const updates = { updated_at: new Date().toISOString() };
+        if (typeof is_enabled === 'boolean') updates.is_enabled = is_enabled;
+        if (typeof system_prompt === 'string' && system_prompt.trim()) updates.system_prompt = system_prompt.trim();
+
+        const { error } = await supabase
+            .from('ai_config')
+            .update(updates)
+            .eq('id', 1);
+
+        if (error) throw error;
+
+        // Invalidate cache agar perubahan langsung aktif tanpa restart PM2
+        invalidateConfigCache();
+
+        res.json({ success: true, message: 'Konfigurasi AI berhasil disimpan.' });
+    } catch (err) {
+        res.status(500).json({ error: 'Gagal menyimpan konfigurasi: ' + err.message });
+    }
+});
+
+// POST /api/ai/config/image — Upload gambar contoh nomor pesanan
+app.post('/api/ai/config/image', uploadAiImage.single('image'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'Tidak ada file gambar yang diupload.' });
+
+        const imageUrl = `${PUBLIC_API_URL}/uploads/ai-config/${req.file.filename}`;
+
+        const { error } = await supabase
+            .from('ai_config')
+            .update({ order_image_url: imageUrl, updated_at: new Date().toISOString() })
+            .eq('id', 1);
+
+        if (error) throw error;
+
+        // Invalidate cache agar URL gambar baru langsung dipakai
+        invalidateConfigCache();
+
+        console.log(`[AI-BOT] 🖼️ Gambar contoh pesanan diperbarui: ${imageUrl}`);
+        res.json({ success: true, image_url: imageUrl });
+    } catch (err) {
+        res.status(500).json({ error: 'Gagal upload gambar: ' + err.message });
     }
 });
 

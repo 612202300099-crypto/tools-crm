@@ -44,6 +44,7 @@ export default function ChatDetail() {
 
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [isResyncing, setIsResyncing] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -141,6 +142,29 @@ export default function ChatDetail() {
         alert("Gagal melakukan Gali Ulang. Detail: " + err.message);
     } finally {
         setIsResyncing(false);
+    }
+  };
+
+  const handleDeleteChat = async () => {
+    const confirmAsk = window.confirm("PERINGATAN KERAS! Anda yakin akan menghapus permanen riwayat pelanggan ini?\n\n- Seluruh Folder File di VPS akan dihapus bersih.\n- Seluruh riwayat DB (customer, pesan, foto) tuntas dilebur.\nLanjutkan?");
+    if (!confirmAsk) return;
+    
+    setIsDeleting(true);
+    try {
+        const waUrl = "https://api-wa.parecustom.com";
+        const res = await fetch(`${waUrl}/api/wa/delete-chats`, {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ customer_ids: [customerId] })
+        });
+
+        if (!res.ok) throw new Error("API Menolak Permintaan Hapus");
+        
+        alert("Pemusnahan Berhasil! Mengembalikan Anda ke Halaman Utama...");
+        router.push('/dashboard');
+    } catch (err: any) {
+        alert("Gagal menghapus data. Detail: " + err.message);
+        setIsDeleting(false);
     }
   };
 
@@ -405,17 +429,25 @@ export default function ChatDetail() {
                 Tandai sebagai Validated hanya jika media foto sudah didownload ke komputer dan telah sinkron dengan Order ID sistem Anda.
              </p>
 
-             {/* FITUR GALI ULANG */}
-             <div className="mt-6 pt-6 border-t border-gray-200">
+             {/* FITUR GALI ULANG & HAPUS */}
+             <div className="mt-6 pt-6 border-t border-gray-200 space-y-3">
                  <button 
                     onClick={handleResync}
-                    disabled={isResyncing}
+                    disabled={isResyncing || isDeleting}
                     className="w-full flex items-center justify-center space-x-2 py-3 rounded-xl text-sm font-bold bg-amber-100/50 text-amber-700 hover:bg-amber-100 focus:ring-4 focus:ring-amber-500/30 transition shadow-sm border border-amber-300"
                  >
                    <svg className={clsx("w-5 h-5", isResyncing && "animate-spin")} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
                    <span>{isResyncing ? 'Menggali Ulang Database...' : 'Gali Ulang Riwayat WA'}</span>
                  </button>
-                 <p className="text-[10px] text-amber-600/70 text-center mt-2 font-medium leading-tight">Gunakan fitur ini jika ada foto masa lalu yang hilang/gagal ditarik.</p>
+                 
+                 <button 
+                    onClick={handleDeleteChat}
+                    disabled={isDeleting}
+                    className="w-full flex items-center justify-center space-x-2 py-3 rounded-xl text-sm font-bold bg-red-50 text-red-600 border border-red-200 hover:bg-red-600 hover:border-red-600 hover:text-white transition shadow-sm"
+                 >
+                   <span>{isDeleting ? 'MEMUSNAHKAN DATA...' : 'Hapus Permanen Riwayat Ini'}</span>
+                 </button>
+                 <p className="text-[10px] text-gray-400 text-center font-medium leading-tight px-2">Gali ulang untuk menarik foto lawas. Hapus Permanen jika ini adalah chat Spam.</p>
              </div>
            </div>
         </div>
