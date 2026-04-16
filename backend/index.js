@@ -248,57 +248,56 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         }
 
         if (message.hasMedia) {
-            console.log(`📥 Mengunduh media dari ${customerPhoneNumber}...`);
-            const media = await message.downloadMedia();
-            
-            if (!media || !media.data) {
-                console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
-                return;
-            }
-
-            if (media && media.data) {
-                const buffer = Buffer.from(media.data, 'base64');
-                const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-                let fileExt = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
-                if (fileExt && fileExt.includes(';')) fileExt = fileExt.split(';')[0];
-                const ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
+            // [FIX] Hanya simpan ke galeri dan update status jika media berasal dari CUSTOMER (!isFromMe)
+            if (!isFromMe) {
+                console.log(`📥 Mengunduh media dari customer ${customerPhoneNumber}...`);
+                const media = await message.downloadMedia();
                 
-                const fileName = `${customer.id}/foto-${uniqueSuffix}.${ext}`;
-
-                try {
-                    // Buat folder jika belum ada (Berdasarkan ID Customer)
-                    const uploadsDir = path.join(__dirname, 'uploads', customer.id.toString());
-                    if (!fs.existsSync(uploadsDir)) {
-                        fs.mkdirSync(uploadsDir, { recursive: true });
-                    }
+                if (!media || !media.data) {
+                    console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
+                } else {
+                    const buffer = Buffer.from(media.data, 'base64');
+                    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+                    let fileExt = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
+                    if (fileExt && fileExt.includes(';')) fileExt = fileExt.split(';')[0];
+                    const ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
                     
-                    // Simpan file ke hardisk VPS langsung (Sangat Cepat & Tanpa Timeout)
-                    const filePath = path.join(__dirname, 'uploads', fileName);
-                    fs.writeFileSync(filePath, buffer);
+                    const fileName = `${customer.id}/foto-${uniqueSuffix}.${ext}`;
 
-                    // Buat link publik untuk diakses frontend
-                    const publicUrl = `${PUBLIC_API_URL}/uploads/${fileName}`;
+                    try {
+                        const uploadsDir = path.join(__dirname, 'uploads', customer.id.toString());
+                        if (!fs.existsSync(uploadsDir)) {
+                            fs.mkdirSync(uploadsDir, { recursive: true });
+                        }
+                        
+                        const filePath = path.join(__dirname, 'uploads', fileName);
+                        fs.writeFileSync(filePath, buffer);
 
-                    await supabase
-                        .from('media')
-                        .insert({
-                            customer_id: customer.id,
-                            message_id: messageRecord ? messageRecord.id : null,
-                            file_url: publicUrl,
-                            file_name: fileName,
-                            created_at: msgTimestamp
-                        });
+                        const publicUrl = `${PUBLIC_API_URL}/uploads/${fileName}`;
 
-                    if (customer.status === 'BELUM_KIRIM_FOTO') {
                         await supabase
-                           .from('customers')
-                           .update({ status: 'SUDAH_KIRIM_FOTO' })
-                           .eq('id', customer.id);
+                            .from('media')
+                            .insert({
+                                customer_id: customer.id,
+                                message_id: messageRecord ? messageRecord.id : null,
+                                file_url: publicUrl,
+                                file_name: fileName,
+                                created_at: msgTimestamp
+                            });
+
+                        if (customer.status === 'BELUM_KIRIM_FOTO') {
+                            await supabase
+                               .from('customers')
+                               .update({ status: 'SUDAH_KIRIM_FOTO' })
+                               .eq('id', customer.id);
+                        }
+                        console.log(`✅ Foto tersimpan di LOKAL VPS dari customer ${customerPhoneNumber}`);
+                    } catch (uploadError) {
+                        console.error('❌ GAGAL MENYIMPAN FOTO KE VPS:', uploadError.message);
                     }
-                    console.log(`✅ Foto tersimpan di LOKAL VPS dari customer ${customerPhoneNumber}`);
-                } catch (uploadError) {
-                    console.error('❌ GAGAL MENYIMPAN FOTO KE VPS:', uploadError.message);
                 }
+            } else {
+                console.log(`[DEBUG] ⏭️ Media dari Bot/Admin (fromMe) dideteksi. Lewati galeri & status update.`);
             }
         }
         // ─── AI FOLLOW-UP: Minta nomor pesanan jika belum ada ─────────────────

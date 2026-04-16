@@ -5,7 +5,7 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import Link from "next/link";
 import { format, startOfDay, endOfDay, subDays, startOfMonth, endOfMonth } from "date-fns";
-import { Search, Filter, Calendar, Trash2 } from "lucide-react";
+import { Search, Filter, Calendar, Trash2, Image as ImageIcon, CheckCircle, XCircle } from "lucide-react";
 
 type Customer = {
   id: string;
@@ -15,6 +15,7 @@ type Customer = {
   status: string;
   is_valid: boolean;
   created_at: string;
+  media?: { count: number }[]; // Gabungan dari Supabase aggregation
 };
 
 export default function DashboardInbox() {
@@ -43,6 +44,7 @@ function DashboardInboxContent() {
   // Initializing state from URL safely
   const initSearch = searchParams.get("search") || "";
   const initStatus = searchParams.get("status") || "ALL";
+  const initOrderFilter = searchParams.get("order") || "ALL";
   const initDate = searchParams.get("date") || "ALL";
   const initCustomStart = searchParams.get("start") || "";
   const initCustomEnd = searchParams.get("end") || "";
@@ -50,6 +52,7 @@ function DashboardInboxContent() {
   // Filter & Search states
   const [searchQuery, setSearchQuery] = useState(initSearch);
   const [filterStatus, setFilterStatus] = useState(initStatus);
+  const [filterOrder, setFilterOrder] = useState(initOrderFilter);
   const [dateFilter, setDateFilter] = useState(initDate);
   const [customStart, setCustomStart] = useState(initCustomStart);
   const [customEnd, setCustomEnd] = useState(initCustomEnd);
@@ -73,9 +76,10 @@ function DashboardInboxContent() {
     setLoading(true);
     
     // Poin 6: Optimasi Server (Tingkatkan Skalabilitas Performa)
+    // Ditambahkan media(count) untuk efisiensi hitung foto per customer tanpa narik datanya
     let query = supabase
       .from("customers")
-      .select("id, phone_number, name, order_id, status, is_valid, created_at")
+      .select("id, phone_number, name, order_id, status, is_valid, created_at, media:media(count)")
       .order("created_at", { ascending: false })
       .limit(1000); // Failsafe memory
 
@@ -138,8 +142,13 @@ function DashboardInboxContent() {
              const exists = prev.some(c => c.id === newCust.id);
              
              if (exists) {
-                 // Replace (Update) baris spesifik tanpa mempengaruiurutan
-                 return prev.map(c => c.id === newCust.id ? newCust : c);
+                 // Replace (Update), pertahankan media_count jika tidak ada di payload
+                 return prev.map(c => {
+                    if (c.id === newCust.id) {
+                        return { ...newCust, media: c.media };
+                    }
+                    return c;
+                 });
              } else {
                  // Prepend (Insert) di posisi ter-atas
                  return [newCust, ...prev];
@@ -172,20 +181,24 @@ function DashboardInboxContent() {
         (c.order_id && c.order_id.toLowerCase().includes(q));
      
      const matchesStatus = filterStatus === "ALL" || c.status === filterStatus;
+     
+     const matchesOrder = filterOrder === "ALL" || 
+        (filterOrder === "SENT" && c.order_id !== null) || 
+        (filterOrder === "NOT_SENT" && c.order_id === null);
 
-     return matchesSearch && matchesStatus;
+     return matchesSearch && matchesStatus && matchesOrder;
   });
 
   const getStatusBadge = (status: string) => {
     switch (status) {
       case 'BELUM_KIRIM_FOTO':
-        return <span className="px-2 py-1 bg-yellow-100 text-yellow-800 text-xs font-medium rounded-full border border-yellow-200 shadow-sm">Belum Kirim Foto</span>;
+        return <span className="px-2.5 py-1 bg-yellow-100 text-yellow-800 text-xs font-bold rounded-full border border-yellow-200 shadow-sm">Belum Kirim Foto</span>;
       case 'SUDAH_KIRIM_FOTO':
-        return <span className="px-2 py-1 bg-blue-100 text-blue-800 text-xs font-medium rounded-full border border-blue-200 shadow-sm">Sudah Kirim Foto</span>;
+        return <span className="px-2.5 py-1 bg-blue-100 text-blue-800 text-xs font-bold rounded-full border border-blue-200 shadow-sm">Sudah Kirim Foto</span>;
       case 'VALIDATED':
-        return <span className="px-2 py-1 bg-green-100 text-green-800 text-xs font-medium rounded-full border border-green-200 shadow-sm">Divalidasi</span>;
+        return <span className="px-2.5 py-1 bg-green-100 text-green-800 text-xs font-bold rounded-full border border-green-200 shadow-sm">Divalidasi</span>;
       default:
-        return <span className="px-2 py-1 bg-gray-100 text-gray-800 text-xs font-medium rounded-full border border-gray-200 shadow-sm">{status.replace(/_/g, ' ')}</span>;
+        return <span className="px-2.5 py-1 bg-gray-100 text-gray-800 text-xs font-bold rounded-full border border-gray-200 shadow-sm">{status.replace(/_/g, ' ')}</span>;
     }
   };
 
@@ -277,6 +290,21 @@ function DashboardInboxContent() {
                <option value="VALIDATED">Selesai/Divalidasi</option>
             </select>
          </div>
+         <div className="relative w-full lg:w-48 shrink-0">
+            <CheckCircle className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
+            <select 
+               value={filterOrder}
+               onChange={e => {
+                   setFilterOrder(e.target.value);
+                   updateUrlParams({ order: e.target.value });
+               }}
+               className="w-full pl-10 pr-8 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 bg-white appearance-none cursor-pointer font-bold text-gray-700 text-sm shadow-sm transition-shadow hover:shadow-md"
+            >
+               <option value="ALL">Order: Semua</option>
+               <option value="SENT">Sudah Kirim ID</option>
+               <option value="NOT_SENT">Belum Kirim ID</option>
+            </select>
+         </div>
          <div className="relative w-full lg:w-56 shrink-0">
             <Calendar className="absolute left-3 top-1/2 transform -translate-y-1/2 text-indigo-500" size={18} />
             <select 
@@ -311,11 +339,12 @@ function DashboardInboxContent() {
       )}
 
       {/* Indikator Filter Aktif */}
-      {(dateFilter !== "ALL" || filterStatus !== "ALL" || searchQuery) && (
+      {(dateFilter !== "ALL" || filterStatus !== "ALL" || filterOrder !== "ALL" || searchQuery) && (
           <div className="flex items-center space-x-2 mb-4 text-xs font-bold text-gray-500">
              <span>Menampilkan hasil: </span>
              {searchQuery && <span className="bg-gray-100 px-2 py-1 rounded text-gray-700">"{searchQuery}"</span>}
              {filterStatus !== "ALL" && <span className="bg-gray-100 px-2 py-1 rounded text-gray-700">{filterStatus.replace(/_/g, ' ')}</span>}
+             {filterOrder !== "ALL" && <span className="bg-gray-100 px-2 py-1 rounded text-gray-700">{filterOrder === "SENT" ? "Sudah Kirim ID" : "Belum Kirim ID"}</span>}
              {dateFilter !== "ALL" && <span className="bg-indigo-100 text-indigo-700 px-2 py-1 rounded">Filter Tanggal Aktif</span>}
           </div>
       )}
@@ -341,7 +370,8 @@ function DashboardInboxContent() {
                     />
                 </th>
                 <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Pelanggan</th>
-                <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Nomor Order</th>
+                <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Jumlah Foto</th>
+                <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">No. Order / ID</th>
                 <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Status Terbaru</th>
                 <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500">Waktu Masuk</th>
                 <th className="p-4 font-bold text-xs uppercase tracking-wider text-gray-500 w-32 text-center">Aksi</th>
@@ -350,7 +380,7 @@ function DashboardInboxContent() {
             <tbody className="divide-y divide-gray-100">
               {loading ? (
                 <tr>
-                    <td colSpan={6} className="p-16">
+                    <td colSpan={7} className="p-16">
                         <div className="flex flex-col items-center justify-center space-y-3">
                             <div className="w-8 h-8 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin"></div>
                             <div className="text-sm font-bold text-indigo-900 animate-pulse">Menarik data dari database...</div>
@@ -359,7 +389,7 @@ function DashboardInboxContent() {
                 </tr>
               ) : filteredCustomers.length === 0 ? (
                 <tr>
-                    <td colSpan={6} className="p-16 text-center">
+                    <td colSpan={7} className="p-16 text-center">
                         <div className="text-gray-400 mb-2">✨</div>
                         <div className="text-base font-bold text-gray-900">Tidak ada pesanan ditemukan</div>
                         <div className="text-sm font-medium text-gray-500 mt-1">Coba ubah kata kunci atau rentang tanggal Anda.</div>
@@ -368,6 +398,9 @@ function DashboardInboxContent() {
               ) : (
                 filteredCustomers.map((c) => {
                   const isChecked = selectedIds.has(c.id);
+                  const mediaCount = c.media?.[0]?.count || 0;
+                  const hasOrder = !!c.order_id;
+                  
                   return (
                   <tr key={c.id} className={`hover:bg-indigo-50/30 transition duration-150 ease-in-out group ${isChecked ? 'bg-red-50/40' : ''}`}>
                     <td className="p-4 text-center border-r border-gray-50/50">
@@ -383,10 +416,33 @@ function DashboardInboxContent() {
                         />
                     </td>
                     <td className="p-4">
-                      <div className="font-extrabold text-gray-900 text-sm group-hover:text-indigo-900 transition-colors">{c.name || 'NN'}</div>
+                      <div className="font-extrabold text-gray-900 text-sm group-hover:text-indigo-900 transition-colors uppercase">{c.name || 'NN'}</div>
                       <div className="text-xs text-gray-500 font-mono mt-0.5 tracking-wide">{c.phone_number}</div>
                     </td>
-                    <td className="p-4 font-bold text-gray-700 text-sm">{c.order_id || '-'}</td>
+                    <td className="p-4">
+                        <div className="flex items-center space-x-2">
+                            <div className={`p-1.5 rounded-lg ${mediaCount > 0 ? 'bg-indigo-100 text-indigo-600' : 'bg-gray-100 text-gray-400'}`}>
+                                <ImageIcon size={14} />
+                            </div>
+                            <span className={`text-sm font-black ${mediaCount > 0 ? 'text-gray-900' : 'text-gray-400'}`}>
+                                {mediaCount} <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">File</span>
+                            </span>
+                        </div>
+                    </td>
+                    <td className="p-4">
+                        {hasOrder ? (
+                            <div className="flex flex-col">
+                                <span className="text-sm font-black text-indigo-700 font-mono tracking-tight">{c.order_id}</span>
+                                <span className="text-[10px] font-bold text-green-600 flex items-center mt-0.5">
+                                    <CheckCircle size={10} className="mr-1" /> TERDETEKSI SISTEM
+                                </span>
+                            </div>
+                        ) : (
+                            <span className="text-xs font-bold text-gray-300 flex items-center">
+                                <XCircle size={12} className="mr-1.5" /> Belum Kirim ID
+                            </span>
+                        )}
+                    </td>
                     <td className="p-4">{getStatusBadge(c.status)}</td>
                     <td className="p-4 text-gray-500 text-sm font-medium whitespace-nowrap">
                       {format(new Date(c.created_at), 'dd MMM yy')}

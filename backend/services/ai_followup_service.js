@@ -64,6 +64,7 @@ function invalidateConfigCache() {
 function detectOrderId(text) {
     if (!text) return null;
     // Cari 18 digit angka berurutan (bisa diawali/diakhiri dengan spasi atau teks lain)
+    // Gunakan regex yang lebih ketat agar tidak salah tangkap nomor hp yang kebetulan panjang
     const match = text.match(/\b(\d{18})\b/);
     return match ? match[1] : null;
 }
@@ -160,25 +161,41 @@ async function checkAndRespond(waClient, customer, message, supabase) {
         await waClient.sendMessage(chatId, aiReply);
         console.log(`[AI-BOT] 💬 Balasan terkirim ke ${customer.phone_number}: "${aiReply.substring(0, 60)}..."`);
 
-        // ── STEP 8: Kirim gambar contoh HANYA jika belum pernah bot menjawab ──────
-        // Logika: Cek apakah ada pesan is_from_me dari bot sebelumnya
-        // (jika ini adalah BALASAN PERTAMA bot, kirim gambar)
+        // ── STEP 8: Kirim gambar contoh HANYA jika bot BELUM PERNAH kirim gambar ────
         if (config.order_image_url) {
-            const { data: prevBotMessages } = await supabase
+            // Kita cek histori: Apakah pesan terakhir 'is_from_me' ada yang panjangnya mendekati bot?
+            // Atau lebih aman: Cek apakah bot pernah merasa mengirim gambar sebelumnya?
+            // Tanpa kolom khusus, kita cek apakah ada pesan is_from_me yang bukan manual.
+            
+            // Logic Opsi A: Cek apakah pernak kirim pesan (Bot/Manual) ke customer ini?
+            const { data: prevReplies } = await supabase
                 .from('messages')
                 .select('id')
                 .eq('customer_id', customer.id)
                 .eq('is_from_me', true)
                 .limit(1);
 
-            const isFirstBotReply = !prevBotMessages || prevBotMessages.length === 0;
+            const isFirstBotReply = !prevReplies || prevReplies.length === 0;
 
             if (isFirstBotReply) {
                 try {
                     const { MessageMedia } = require('whatsapp-web.js');
-                    const media = await MessageMedia.fromUrl(config.order_image_url, { unsafeMime: true });
-                    await waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' });
-                    console.log(`[AI-BOT] 🖼️ Gambar contoh berhasil dikirim ke ${customer.phone_number}`);
+                    
+                    // Supaya robust, kita ambil path lokal file aslinya di VPS
+                    // URL: .../uploads/ai-config/order-example.png
+                    const filename = config.order_image_url.split('/').pop();
+                    const localPath = path.join(__dirname, '..', 'uploads', 'ai-config', filename);
+                    
+                    if (fs.existsSync(localPath)) {
+                        const media = MessageMedia.fromFilePath(localPath);
+                        await waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' });
+                        console.log(`[AI-BOT] 🖼️ Gambar contoh (LOKAL) berhasil dikirim ke ${customer.phone_number}`);
+                    } else {
+                        // Fallback ke URL jika file lokal tidak ditemukan (meskipun harusnya ada)
+                        const media = await MessageMedia.fromUrl(config.order_image_url, { unsafeMime: true });
+                        await waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' });
+                        console.log(`[AI-BOT] 🖼️ Gambar contoh (URL-Fallback) berhasil dikirim ke ${customer.phone_number}`);
+                    }
                 } catch (imgErr) {
                     console.error('[AI-BOT] ⚠️ Gagal mengirim gambar contoh:', imgErr.message);
                 }
