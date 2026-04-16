@@ -561,6 +561,110 @@ app.post('/api/wa/delete-chats', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// ENDPOINT API: MANAJEMEN MEDIA (Scan AI & Hapus Massal)
+// ═══════════════════════════════════════════════════════════
+const { scanImageForOrderId, deleteMediaBulk } = require('./services/media_service');
+
+// POST /api/media/scan — Scan satu gambar untuk menemukan Nomor Pesanan via AI Vision
+app.post('/api/media/scan', async (req, res) => {
+    const { media_id, customer_id } = req.body;
+    if (!media_id || !customer_id) {
+        return res.status(400).json({ error: 'media_id dan customer_id diperlukan.' });
+    }
+
+    try {
+        // Ambil info media dari database
+        const { data: media, error: mediaErr } = await supabase
+            .from('media')
+            .select('id, file_name, customer_id')
+            .eq('id', media_id)
+            .single();
+
+        if (mediaErr || !media) {
+            return res.status(404).json({ error: 'Media tidak ditemukan di database.' });
+        }
+
+        // Guard: Pastikan media milik customer yang benar (anti manipulasi)
+        if (media.customer_id !== customer_id) {
+            return res.status(403).json({ error: 'Media ini bukan milik customer tersebut.' });
+        }
+
+        // Bangun path lokal file
+        const filePath = path.join(__dirname, 'uploads', media.file_name);
+        if (!fs.existsSync(filePath)) {
+            return res.status(404).json({ error: 'File fisik tidak ditemukan di server. Coba resync terlebih dahulu.' });
+        }
+
+        console.log(`[MEDIA-SCAN] 🔍 Memindai gambar ${media.file_name} untuk Customer ${customer_id}...`);
+        const result = await scanImageForOrderId(filePath);
+
+        if (result.found) {
+            // Otomatis simpan ke database customer
+            await supabase
+                .from('customers')
+                .update({ order_id: result.orderId })
+                .eq('id', customer_id);
+
+            console.log(`[MEDIA-SCAN] ✅ Nomor pesanan ditemukan: ${result.orderId}`);
+            return res.json({ success: true, found: true, order_id: result.orderId });
+        }
+
+        console.log(`[MEDIA-SCAN] ❌ Tidak ditemukan 18 digit di gambar. Raw: ${result.raw}`);
+        return res.json({ success: true, found: false, message: 'Nomor pesanan (18 digit) tidak ditemukan dalam gambar ini.' });
+
+    } catch (err) {
+        console.error('[MEDIA-SCAN] FATAL:', err.message);
+        return res.status(500).json({ error: 'Gagal memindai gambar: ' + err.message });
+    }
+});
+
+// POST /api/media/delete-bulk — Hapus beberapa media sekaligus (file VPS + database)
+app.post('/api/media/delete-bulk', async (req, res) => {
+    const { media_ids, customer_id } = req.body;
+    if (!Array.isArray(media_ids) || media_ids.length === 0 || !customer_id) {
+        return res.status(400).json({ error: 'media_ids (array) dan customer_id diperlukan.' });
+    }
+
+    try {
+        // Ambil data media yang akan dihapus (hanya milik customer tersebut)
+        const { data: mediaItems, error: fetchErr } = await supabase
+            .from('media')
+            .select('id, file_name')
+            .in('id', media_ids)
+            .eq('customer_id', customer_id);
+
+        if (fetchErr || !mediaItems || mediaItems.length === 0) {
+            return res.status(404).json({ error: 'Tidak ada media valid yang ditemukan untuk dihapus.' });
+        }
+
+        console.log(`[MEDIA-DELETE] 🗑️ Menghapus ${mediaItems.length} file media milik Customer ${customer_id}...`);
+        const result = await deleteMediaBulk(mediaItems, supabase);
+
+        // Hitung ulang: Jika semua media habis, kembalikan status ke BELUM_KIRIM_FOTO
+        const { data: remaining } = await supabase
+            .from('media')
+            .select('id')
+            .eq('customer_id', customer_id)
+            .limit(1);
+
+        if (!remaining || remaining.length === 0) {
+            await supabase
+                .from('customers')
+                .update({ status: 'BELUM_KIRIM_FOTO' })
+                .eq('id', customer_id);
+            console.log(`[MEDIA-DELETE] ℹ️ Semua media habis — status direset ke BELUM_KIRIM_FOTO.`);
+        }
+
+        console.log(`[MEDIA-DELETE] ✅ Berhasil: ${result.deleted}, Gagal: ${result.failed}`);
+        return res.json({ success: true, deleted: result.deleted, failed: result.failed });
+
+    } catch (err) {
+        console.error('[MEDIA-DELETE] FATAL:', err.message);
+        return res.status(500).json({ error: 'Gagal menghapus media: ' + err.message });
+    }
+});
+
+// ═══════════════════════════════════════════════════════════
 // ENDPOINT API: KONFIGURASI AI BOT
 // ═══════════════════════════════════════════════════════════
 

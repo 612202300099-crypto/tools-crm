@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabaseClient";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
-import { ArrowLeft, Download, CheckCircle, Image as ImageIcon, MessageSquare, Send } from "lucide-react";
+import { ArrowLeft, Download, CheckCircle, Image as ImageIcon, MessageSquare, Send, ScanSearch, Trash2 } from "lucide-react";
 import Link from "next/link";
 import clsx from "clsx";
 
@@ -22,6 +22,8 @@ type Media = {
   file_url: string;
   file_name: string;
 };
+
+const WA_API_URL = "https://api-wa.parecustom.com";
 
 export default function ChatDetail() {
   const params = useParams();
@@ -45,6 +47,11 @@ export default function ChatDetail() {
   const [loadingMedia, setLoadingMedia] = useState(false);
   const [isResyncing, setIsResyncing] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  
+  // Fitur Baru: Scan AI & Hapus Media
+  const [isScanning, setIsScanning] = useState(false);
+  const [isDeletingMedia, setIsDeletingMedia] = useState(false);
+  const [scanResult, setScanResult] = useState<{type: 'success'|'error'|'not_found', message: string} | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -62,12 +69,16 @@ export default function ChatDetail() {
          }
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'media', filter: `customer_id=eq.${customerId}` }, payload => {
-         // Susun media baru di paling atas karena urutan tabel media adalah descending
          if (payload.eventType === 'INSERT') {
              setMediaList(prev => [payload.new as Media, ...prev]);
          } else if (payload.eventType === 'DELETE') {
              setMediaList(prev => prev.filter(m => m.id !== payload.old.id));
          }
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'customers', filter: `id=eq.${customerId}` }, payload => {
+         const updated = payload.new;
+         setCustomer((prev: any) => ({ ...prev, ...updated }));
+         if (updated.order_id) setOrderIdInput(updated.order_id);
       })
       .subscribe();
 
@@ -77,11 +88,18 @@ export default function ChatDetail() {
   }, [customerId]);
 
   useEffect(() => {
-    // Auto scroll chat ke paling bawah
     if (scrollRef.current) {
         scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  // Auto-hilangkan notifikasi scan setelah 5 detik
+  useEffect(() => {
+    if (scanResult) {
+      const timer = setTimeout(() => setScanResult(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [scanResult]);
 
   const fetchData = async () => {
     const { data: cData } = await supabase.from('customers').select('*').eq('id', customerId).single();
@@ -118,8 +136,7 @@ export default function ChatDetail() {
     
     setIsResyncing(true);
     try {
-        const waUrl = "https://api-wa.parecustom.com";
-        const res = await fetch(`${waUrl}/api/wa/resync`, {
+        const res = await fetch(`${WA_API_URL}/api/wa/resync`, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({ 
@@ -134,7 +151,6 @@ export default function ChatDetail() {
         }
         
         alert("Gali Ulang SUKSES! Halaman ini akan disegarkan ulang otomatis untuk menampilkan foto murni dari WA.");
-        // Bersihkan state media
         setMessages([]);
         setMediaList([]);
         fetchData();
@@ -151,8 +167,7 @@ export default function ChatDetail() {
     
     setIsDeleting(true);
     try {
-        const waUrl = "https://api-wa.parecustom.com";
-        const res = await fetch(`${waUrl}/api/wa/delete-chats`, {
+        const res = await fetch(`${WA_API_URL}/api/wa/delete-chats`, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({ customer_ids: [customerId] })
@@ -165,6 +180,79 @@ export default function ChatDetail() {
     } catch (err: any) {
         alert("Gagal menghapus data. Detail: " + err.message);
         setIsDeleting(false);
+    }
+  };
+
+  // ─── FITUR BARU: Scan AI Vision ───────────────────────────────────
+  const handleScanAI = async () => {
+    if (selectedMedia.size === 0) {
+        setScanResult({ type: 'error', message: 'Pilih minimal 1 gambar untuk di-scan.' });
+        return;
+    }
+    if (selectedMedia.size > 1) {
+        setScanResult({ type: 'error', message: 'Pilih hanya 1 gambar untuk di-scan agar hasil lebih akurat.' });
+        return;
+    }
+
+    const mediaId = Array.from(selectedMedia)[0];
+    setIsScanning(true);
+    setScanResult(null);
+
+    try {
+        const res = await fetch(`${WA_API_URL}/api/media/scan`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ media_id: mediaId, customer_id: customerId })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+            throw new Error(data.error || 'Gagal memindai gambar.');
+        }
+
+        if (data.found) {
+            setOrderIdInput(data.order_id);
+            setCustomer((prev: any) => ({ ...prev, order_id: data.order_id }));
+            setScanResult({ type: 'success', message: `✅ Nomor pesanan ditemukan: ${data.order_id}` });
+        } else {
+            setScanResult({ type: 'not_found', message: '⚠️ Nomor pesanan (18 digit) tidak ditemukan di gambar ini. Coba pilih gambar lain.' });
+        }
+    } catch (err: any) {
+        setScanResult({ type: 'error', message: `❌ Error: ${err.message}` });
+    } finally {
+        setIsScanning(false);
+    }
+  };
+
+  // ─── FITUR BARU: Hapus Media Terpilih ─────────────────────────────
+  const handleDeleteMedia = async () => {
+    if (selectedMedia.size === 0) return;
+
+    const confirmAsk = window.confirm(`Anda akan menghapus ${selectedMedia.size} foto secara permanen dari server. File tidak bisa dikembalikan. Lanjutkan?`);
+    if (!confirmAsk) return;
+
+    setIsDeletingMedia(true);
+    try {
+        const res = await fetch(`${WA_API_URL}/api/media/delete-bulk`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+                media_ids: Array.from(selectedMedia), 
+                customer_id: customerId 
+            })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Gagal menghapus media.');
+
+        // Bersihkan seleksi & refresh data
+        setSelectedMedia(new Set());
+        setScanResult({ type: 'success', message: `✅ ${data.deleted} foto berhasil dihapus dari server.` });
+    } catch (err: any) {
+        setScanResult({ type: 'error', message: `❌ Gagal hapus: ${err.message}` });
+    } finally {
+        setIsDeletingMedia(false);
     }
   };
 
@@ -203,7 +291,6 @@ export default function ChatDetail() {
         zip.file(`foto_${++count}.${ext}`, blob);
       }
 
-      // Generate file zip ke browser
       const zipBlob = await zip.generateAsync({ type: "blob" });
       const zipFileName = `${orderName}.zip`;
       
@@ -223,13 +310,7 @@ export default function ChatDetail() {
     
     setIsSending(true);
     try {
-       // KOREKSI DARURAT: Kita tembak langsung ke HTTPS aslinya tanpa melewati Env Variable Vercel
-       // karena "Failed to fetch" 90% mengindikasikan Vercel kehilangan jejak URL API-nya.
-       const waUrl = "https://api-wa.parecustom.com";
-       
-       console.log("Mencoba fetch ke URL:", `${waUrl}/api/wa/send`);
-       
-       const res = await fetch(`${waUrl}/api/wa/send`, {
+       const res = await fetch(`${WA_API_URL}/api/wa/send`, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({ 
@@ -332,6 +413,18 @@ export default function ChatDetail() {
           </div>
           
           <div className="flex-1 overflow-y-auto p-4 relative">
+             {/* Notifikasi Hasil Scan (Toast) */}
+             {scanResult && (
+               <div className={clsx(
+                 "mb-4 p-3 rounded-xl text-xs font-bold border animate-in fade-in slide-in-from-top-2 duration-300",
+                 scanResult.type === 'success' && "bg-green-50 text-green-800 border-green-200",
+                 scanResult.type === 'error' && "bg-red-50 text-red-800 border-red-200",
+                 scanResult.type === 'not_found' && "bg-amber-50 text-amber-800 border-amber-200"
+               )}>
+                 {scanResult.message}
+               </div>
+             )}
+
              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
                {mediaList.map(media => {
                  const isSelected = selectedMedia.has(media.id);
@@ -365,16 +458,51 @@ export default function ChatDetail() {
              )}
           </div>
           
-          <div className="p-4 border-t bg-white flex items-center justify-between shadow-sm z-10">
-             <span className="text-sm font-bold text-gray-600 px-3 py-1 bg-gray-100 rounded-lg">{selectedMedia.size} Terpilih</span>
-             <button 
-                onClick={processZipDownload}
-                disabled={loadingMedia || selectedMedia.size === 0}
-                className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white px-5 py-2.5 rounded-xl text-sm font-bold transition shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
-             >
-                {loadingMedia ? <span className="animate-pulse">Zipping File...</span> : <Download size={18} />}
-                {!loadingMedia && <span>Download Data Zip</span>}
-             </button>
+          {/* Footer Media: Download + Scan AI + Hapus */}
+          <div className="p-4 border-t bg-white space-y-3 shadow-sm z-10">
+             <div className="flex items-center justify-between">
+                <span className="text-sm font-bold text-gray-600 px-3 py-1 bg-gray-100 rounded-lg">{selectedMedia.size} Terpilih</span>
+                <button 
+                   onClick={processZipDownload}
+                   disabled={loadingMedia || selectedMedia.size === 0}
+                   className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white px-5 py-2.5 rounded-xl text-sm font-bold transition shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+                >
+                   {loadingMedia ? <span className="animate-pulse">Zipping File...</span> : <Download size={18} />}
+                   {!loadingMedia && <span>Download Zip</span>}
+                </button>
+             </div>
+
+             {/* Baris Aksi: Scan AI + Hapus */}
+             <div className="flex gap-2">
+                <button 
+                   onClick={handleScanAI}
+                   disabled={isScanning || selectedMedia.size === 0}
+                   className="flex-1 flex items-center justify-center space-x-2 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-300 text-white px-4 py-2.5 rounded-xl text-xs font-bold transition shadow-sm"
+                >
+                   {isScanning ? (
+                     <span className="w-4 h-4 border-2 border-white border-t-violet-300 rounded-full animate-spin"></span>
+                   ) : (
+                     <ScanSearch size={16} />
+                   )}
+                   <span>{isScanning ? 'Memindai...' : 'Scan ID (AI)'}</span>
+                </button>
+                <button 
+                   onClick={handleDeleteMedia}
+                   disabled={isDeletingMedia || selectedMedia.size === 0}
+                   className="flex items-center justify-center space-x-2 bg-red-50 hover:bg-red-600 text-red-600 hover:text-white border border-red-200 hover:border-red-600 disabled:bg-gray-100 disabled:text-gray-400 disabled:border-gray-200 px-4 py-2.5 rounded-xl text-xs font-bold transition shadow-sm"
+                >
+                   {isDeletingMedia ? (
+                     <span className="w-4 h-4 border-2 border-red-400 border-t-red-200 rounded-full animate-spin"></span>
+                   ) : (
+                     <Trash2 size={16} />
+                   )}
+                   <span>{isDeletingMedia ? 'Menghapus...' : 'Hapus'}</span>
+                </button>
+             </div>
+
+             <p className="text-[10px] text-gray-400 text-center font-medium leading-tight">
+               Scan AI: Pilih 1 screenshot → ekstra nomor pesanan otomatis. Hapus: Bersihkan foto yang tidak perlu.
+             </p>
           </div>
         </div>
 
@@ -400,9 +528,17 @@ export default function ChatDetail() {
                   type="text" 
                   value={orderIdInput} 
                   onChange={e => setOrderIdInput(e.target.value)}
-                  className="w-full border-2 border-gray-200 rounded-xl px-4 py-3 text-sm focus:border-indigo-500 focus:ring-0 outline-none transition bg-gray-50 focus:bg-white font-medium font-mono"
-                  placeholder="Contoh: ORD-1002345" 
+                  className={clsx(
+                    "w-full border-2 rounded-xl px-4 py-3 text-sm focus:ring-0 outline-none transition font-medium font-mono",
+                    orderIdInput ? "border-green-300 bg-green-50/50 focus:border-green-500 text-green-800" : "border-gray-200 bg-gray-50 focus:bg-white focus:border-indigo-500"
+                  )}
+                  placeholder="Contoh: 241216123456789012" 
                 />
+                {orderIdInput && (
+                  <p className="text-[10px] font-bold text-green-600 mt-1.5 flex items-center">
+                    <CheckCircle size={10} className="mr-1" /> Nomor pesanan terisi
+                  </p>
+                )}
               </div>
 
               <button 
