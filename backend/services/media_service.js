@@ -30,34 +30,40 @@ async function scanImageForOrderId(filePath) {
     const mimeType = mimeMap[ext] || 'image/jpeg';
 
     const completion = await openaiClient.chat.completions.create({
-        model: 'gpt-4o-mini',
+        model: 'gpt-4o',
         messages: [
             {
                 role: 'system',
-                content: `Kamu adalah sistem OCR yang bertugas mengekstrak Nomor Pesanan dari screenshot marketplace Indonesia (Shopee, Tokopedia, TikTok Shop, dll).
-Nomor pesanan adalah deretan TEPAT 18 digit angka berurutan (contoh: 241216ABCDEFGH1234 TIDAK valid, tapi 241216123456789012 VALID).
-ATURAN:
-- Cari angka yang terdiri dari TEPAT 18 digit berurutan di dalam gambar.
-- Jika menemukan, balas HANYA dengan angka 18 digit tersebut (tanpa teks lain).
-- Jika TIDAK menemukan 18 digit angka berurutan, balas HANYA dengan teks: NOT_FOUND
-- Jangan mengarang atau menebak. Hanya lapor apa yang terlihat di gambar.`
+                content: `Kamu adalah sistem OCR presisi tinggi yang bertugas mengekstrak Nomor Pesanan dari screenshot marketplace Indonesia (Shopee, Tokopedia, TikTok Shop, Lazada, dll).
+
+DEFINISI NOMOR PESANAN:
+- Deretan TEPAT 18 digit angka (0-9) berurutan tanpa spasi, huruf, atau karakter lain di antaranya.
+- Contoh VALID: 240416987654321012
+- Contoh TIDAK VALID: 2404-1698-7654-3210 (ada strip), INV240416987654 (ada huruf)
+
+PROSEDUR WAJIB:
+1. Pindai seluruh area gambar dengan teliti, termasuk pojok dan area kecil.
+2. Jika menemukan kandidat 18 digit, BACA ULANG setiap digit satu per satu dari kiri ke kanan untuk memastikan tidak ada digit yang salah baca (misal: 8 vs 0, 1 vs 7, 6 vs 8, 5 vs 6).
+3. Jika yakin 100% dengan setiap digit, balas HANYA dengan 18 digit angka tersebut (tanpa teks, spasi, atau karakter lain).
+4. Jika TIDAK menemukan atau RAGU pada satu digit pun, balas HANYA: NOT_FOUND
+5. DILARANG KERAS mengarang, menebak, atau menginterpolasi digit yang tidak terbaca jelas.`
             },
             {
                 role: 'user',
                 content: [
-                    { type: 'text', text: 'Temukan nomor pesanan (18 digit angka) dari screenshot ini.' },
+                    { type: 'text', text: 'Temukan dan baca dengan sangat teliti nomor pesanan (18 digit angka) dari screenshot ini. Periksa ulang setiap digit sebelum menjawab.' },
                     {
                         type: 'image_url',
                         image_url: {
                             url: `data:${mimeType};base64,${base64Image}`,
-                            detail: 'low' // Hemat biaya: low-res cukup untuk membaca angka
+                            detail: 'high' // High-res: resolusi penuh untuk akurasi maksimal
                         }
                     }
                 ]
             }
         ],
         max_tokens: 50,
-        temperature: 0, // Deterministik: Tidak ada kreativitas, hanya fakta
+        temperature: 0,
     });
 
     const rawReply = (completion.choices[0]?.message?.content || '').trim();
