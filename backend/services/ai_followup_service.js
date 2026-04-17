@@ -2,26 +2,36 @@
  * AI Follow-Up Service
  * Tugas: Membalas customer yang belum kirim nomor pesanan menggunakan OpenAI.
  * Auto-OFF ketika customer sudah mengirim nomor pesanan (18 digit).
+ * Setelah nomor pesanan ditemukan → kirim pesan follow-up (ketentuan + link video).
  */
 
 const OpenAI = require('openai');
 const path = require('path');
+const fs = require('fs');
 
 // ─── Inisialisasi Client OpenAI ───────────────────────────────────────────────
 const openaiClient = new OpenAI({
     apiKey: process.env.OPENAI_API_KEY,
 });
 
+// ─── Timeout Utility ──────────────────────────────────────────────────────────
+// Membungkus promise dengan batas waktu agar tidak hang selamanya.
+function withTimeout(promise, ms, label = 'Operation') {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) =>
+            setTimeout(() => reject(new Error(`[TIMEOUT] ${label} melebihi ${ms / 1000}s`)), ms)
+        ),
+    ]);
+}
+
 // ─── Cache Konfigurasi In-Memory (Refresh tiap 5 menit) ───────────────────────
-// Tujuan: Tidak query database setiap ada pesan masuk. Hemat resource server.
 let configCache = null;
 let configCacheTime = 0;
 const CONFIG_CACHE_TTL_MS = 5 * 60 * 1000; // 5 menit
 
 /**
- * Ambil konfigurasi AI dari Supabase, tapi cahced di memori.
- * @param {import('@supabase/supabase-js').SupabaseClient} supabase
- * @returns {Promise<{is_enabled: boolean, system_prompt: string, order_image_url: string|null}>}
+ * Ambil konfigurasi AI dari Supabase, tapi cached di memori.
  */
 async function getCachedAiConfig(supabase) {
     const now = Date.now();
@@ -31,14 +41,13 @@ async function getCachedAiConfig(supabase) {
 
     const { data, error } = await supabase
         .from('ai_config')
-        .select('is_enabled, system_prompt, order_image_url')
+        .select('is_enabled, system_prompt, order_image_url, post_order_message')
         .eq('id', 1)
         .single();
 
     if (error || !data) {
         console.error('[AI-BOT] Gagal membaca konfigurasi dari DB:', error?.message);
-        // Fallback aman: bot dinonaktifkan jika config tidak bisa dibaca
-        return { is_enabled: false, system_prompt: '', order_image_url: null };
+        return { is_enabled: false, system_prompt: '', order_image_url: null, post_order_message: '' };
     }
 
     configCache = data;
@@ -58,22 +67,15 @@ function invalidateConfigCache() {
 
 /**
  * Deteksi apakah teks berisi nomor pesanan valid (18 digit angka berurutan).
- * @param {string} text
- * @returns {string|null} nomor pesanan jika ditemukan, null jika tidak
  */
 function detectOrderId(text) {
     if (!text) return null;
-    // Cari 18 digit angka berurutan (bisa diawali/diakhiri dengan spasi atau teks lain)
-    // Gunakan regex yang lebih ketat agar tidak salah tangkap nomor hp yang kebetulan panjang
     const match = text.match(/\b(\d{18})\b/);
     return match ? match[1] : null;
 }
 
 /**
  * Minta OpenAI untuk membuat balasan berdasarkan konteks percakapan.
- * @param {Array<{role: string, content: string}>} conversationHistory - Max 5 pesan terakhir
- * @param {string} systemPrompt
- * @returns {Promise<string>} teks balasan dari AI
  */
 async function getAIReply(conversationHistory, systemPrompt) {
     const messages = [
@@ -81,31 +83,60 @@ async function getAIReply(conversationHistory, systemPrompt) {
         ...conversationHistory,
     ];
 
-    const completion = await openaiClient.chat.completions.create({
-        model: 'gpt-4o-mini', // Paling hemat biaya, cukup untuk kasus CS bot
-        messages,
-        max_tokens: 200,      // Balasan singkat, tidak perlu panjang
-        temperature: 0.7,     // Sedikit variasi agar tidak robotik
-    });
+    const completion = await withTimeout(
+        openaiClient.chat.completions.create({
+            model: 'gpt-4o-mini',
+            messages,
+            max_tokens: 200,
+            temperature: 0.7,
+        }),
+        30000, // 30 detik timeout
+        'OpenAI getAIReply'
+    );
 
     return completion.choices[0]?.message?.content?.trim() || 'Halo kak, bisa kirim nomor pesanannya dulu ya 😊🙏';
 }
 
 /**
- * FUNGSI UTAMA — dipanggil dari index.js setiap ada pesan masuk dari customer.
- *
- * Flow:
- * 1. Guard: Lewati jika pesan dari kita sendiri (fromMe)
- * 2. Guard: Lewati jika customer sudah punya order_id di DB
- * 3. Deteksi: Apakah pesan mengandung 18 digit? → Update DB, hentikan bot
- * 4. Guard: Cek apakah bot aktif di konfigurasi
- * 5. Bangun konteks percakapan (5 pesan terakhir) → panggil OpenAI → kirim balasan
- * 6. (Hanya sekali) Kirim gambar contoh nomor pesanan jika ada
- *
- * @param {import('whatsapp-web.js').Client} waClient - WhatsApp client
- * @param {object} customer - Data customer dari DB {id, phone_number, order_id, ...}
- * @param {import('whatsapp-web.js').Message} message - Pesan WA yang masuk
+ * Kirim pesan follow-up setelah nomor pesanan ditemukan.
+ * Berisi ketentuan kirim foto + link video TikTok (jika ada).
+ * 
+ * @param {import('whatsapp-web.js').Client} waClient
+ * @param {string} phoneNumber - Nomor HP customer (tanpa @c.us)
+ * @param {string} orderId - Nomor pesanan yang ditemukan
  * @param {import('@supabase/supabase-js').SupabaseClient} supabase
+ */
+async function sendPostOrderFollowUp(waClient, phoneNumber, orderId, supabase) {
+    try {
+        const config = await getCachedAiConfig(supabase);
+        
+        if (!config.post_order_message || !config.post_order_message.trim()) {
+            console.log('[AI-BOT] ℹ️ Pesan follow-up kosong — skip pengiriman.');
+            return;
+        }
+
+        const chatId = phoneNumber + '@c.us';
+        
+        // Replace placeholder {order_id} jika ada di template
+        const finalMessage = config.post_order_message
+            .replace(/\{order_id\}/g, orderId)
+            .replace(/\{nomor_pesanan\}/g, orderId);
+
+        await withTimeout(
+            waClient.sendMessage(chatId, finalMessage),
+            30000,
+            'WA sendPostOrderFollowUp'
+        );
+
+        console.log(`[AI-BOT] 📋 Pesan follow-up (ketentuan + link) terkirim ke ${phoneNumber}`);
+    } catch (err) {
+        // Fail-safe: Gagal kirim follow-up tidak boleh mengganggu operasi lain
+        console.error('[AI-BOT] ⚠️ Gagal kirim pesan follow-up:', err.message);
+    }
+}
+
+/**
+ * FUNGSI UTAMA — dipanggil dari index.js setiap ada pesan masuk dari customer.
  */
 async function checkAndRespond(waClient, customer, message, supabase) {
     try {
@@ -118,13 +149,16 @@ async function checkAndRespond(waClient, customer, message, supabase) {
         // ── GUARD 3: Deteksi apakah pesan ini berisi nomor pesanan (18 digit) ──
         const foundOrderId = detectOrderId(message.body);
         if (foundOrderId) {
-            console.log(`[AI-BOT] ✅ Nomor pesanan ${foundOrderId} ditemukan dari ${customer.phone_number}. Bot dinonaktifkan.`);
+            console.log(`[AI-BOT] ✅ Nomor pesanan ${foundOrderId} ditemukan dari ${customer.phone_number}. Menyimpan & follow-up...`);
             // Simpan nomor pesanan ke database
             await supabase
                 .from('customers')
                 .update({ order_id: foundOrderId })
                 .eq('id', customer.id);
-            return; // Bot berhenti, manusia ambil alih
+
+            // Kirim pesan follow-up (ketentuan + link TikTok)
+            await sendPostOrderFollowUp(waClient, customer.phone_number, foundOrderId, supabase);
+            return;
         }
 
         // ── GUARD 4: Cek apakah fitur AI aktif ───────────────────────────────────
@@ -145,7 +179,6 @@ async function checkAndRespond(waClient, customer, message, supabase) {
             .order('created_at', { ascending: false })
             .limit(5);
 
-        // Balik urutan agar percakapan runut (lama → baru)
         const history = (recentMessages || []).reverse().map(msg => ({
             role: msg.is_from_me ? 'assistant' : 'user',
             content: msg.body,
@@ -158,16 +191,15 @@ async function checkAndRespond(waClient, customer, message, supabase) {
 
         // ── STEP 7: Kirim balasan teks ke WA customer ─────────────────────────────
         const chatId = customer.phone_number + '@c.us';
-        await waClient.sendMessage(chatId, aiReply);
+        await withTimeout(
+            waClient.sendMessage(chatId, aiReply),
+            30000,
+            'WA sendMessage AI reply'
+        );
         console.log(`[AI-BOT] 💬 Balasan terkirim ke ${customer.phone_number}: "${aiReply.substring(0, 60)}..."`);
 
-        // ── STEP 8: Kirim gambar contoh HANYA jika bot BELUM PERNAH kirim gambar ────
+        // ── STEP 8: Kirim gambar contoh HANYA jika bot BELUM PERNAH kirim ────
         if (config.order_image_url) {
-            // Kita cek histori: Apakah pesan terakhir 'is_from_me' ada yang panjangnya mendekati bot?
-            // Atau lebih aman: Cek apakah bot pernah merasa mengirim gambar sebelumnya?
-            // Tanpa kolom khusus, kita cek apakah ada pesan is_from_me yang bukan manual.
-            
-            // Logic Opsi A: Cek apakah pernak kirim pesan (Bot/Manual) ke customer ini?
             const { data: prevReplies } = await supabase
                 .from('messages')
                 .select('id')
@@ -181,19 +213,28 @@ async function checkAndRespond(waClient, customer, message, supabase) {
                 try {
                     const { MessageMedia } = require('whatsapp-web.js');
                     
-                    // Supaya robust, kita ambil path lokal file aslinya di VPS
-                    // URL: .../uploads/ai-config/order-example.png
                     const filename = config.order_image_url.split('/').pop();
                     const localPath = path.join(__dirname, '..', 'uploads', 'ai-config', filename);
                     
                     if (fs.existsSync(localPath)) {
                         const media = MessageMedia.fromFilePath(localPath);
-                        await waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' });
-                        console.log(`[AI-BOT] 🖼️ Gambar contoh (LOKAL) berhasil dikirim ke ${customer.phone_number}`);
+                        await withTimeout(
+                            waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' }),
+                            30000,
+                            'WA sendImage contoh'
+                        );
+                        console.log(`[AI-BOT] 🖼️ Gambar contoh berhasil dikirim ke ${customer.phone_number}`);
                     } else {
-                        // Fallback ke URL jika file lokal tidak ditemukan (meskipun harusnya ada)
-                        const media = await MessageMedia.fromUrl(config.order_image_url, { unsafeMime: true });
-                        await waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' });
+                        const media = await withTimeout(
+                            MessageMedia.fromUrl(config.order_image_url, { unsafeMime: true }),
+                            30000,
+                            'WA fromUrl fallback'
+                        );
+                        await withTimeout(
+                            waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' }),
+                            30000,
+                            'WA sendImage URL fallback'
+                        );
                         console.log(`[AI-BOT] 🖼️ Gambar contoh (URL-Fallback) berhasil dikirim ke ${customer.phone_number}`);
                     }
                 } catch (imgErr) {
@@ -210,6 +251,8 @@ async function checkAndRespond(waClient, customer, message, supabase) {
 
 module.exports = {
     checkAndRespond,
+    sendPostOrderFollowUp,
     invalidateConfigCache,
     detectOrderId,
+    withTimeout,
 };

@@ -9,7 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 const cleanupService = require('./services/cleanup_service');
-const { checkAndRespond, invalidateConfigCache } = require('./services/ai_followup_service');
+const { checkAndRespond, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
 const app = express();
 app.use(cors());
@@ -66,9 +66,10 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         
         let chat;
         try {
-            chat = await message.getChat();
+            chat = await withTimeout(message.getChat(), 30000, 'getChat');
         } catch (e) {
-            return; // Gagalkan jika chat tidak ada wujudnya
+            console.error(`[TIMEOUT-GUARD] getChat gagal/timeout:`, e.message);
+            return;
         }
 
         if (chat.isGroup) {
@@ -96,13 +97,13 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         let contactPushname = 'Pelanggan Baru';
         
         try {
-            const contact = await chat.getContact();
+            const contact = await withTimeout(chat.getContact(), 15000, 'getContact');
             if (contact) {
-                if (contact.number) customerPhoneNumber = String(contact.number).replace(/\D/g, ''); // Prioritas: Resolusi HP Asli
+                if (contact.number) customerPhoneNumber = String(contact.number).replace(/\D/g, '');
                 if (contact.pushname) contactPushname = contact.pushname;
             }
         } catch (err) {
-             console.error("[DEBUG] Gagal getContact (Fallback berlajan)", err.message);
+             console.error("[TIMEOUT-GUARD] getContact gagal/timeout (Fallback berjalan):", err.message);
         }
 
         if (!customerPhoneNumber) customerPhoneNumber = String(chat.id.user).replace(/\D/g, ''); // Fallback string regex aman
@@ -251,7 +252,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             // [FIX] Hanya simpan ke galeri dan update status jika media berasal dari CUSTOMER (!isFromMe)
             if (!isFromMe) {
                 console.log(`📥 Mengunduh media dari customer ${customerPhoneNumber}...`);
-                const media = await message.downloadMedia();
+                const media = await withTimeout(message.downloadMedia(), 60000, 'downloadMedia');
                 
                 if (!media || !media.data) {
                     console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
@@ -605,6 +606,12 @@ app.post('/api/media/scan', async (req, res) => {
                 .update({ order_id: result.orderId })
                 .eq('id', customer_id);
 
+            // Kirim pesan follow-up (ketentuan + link TikTok) via WA
+            const { data: custData } = await supabase.from('customers').select('phone_number').eq('id', customer_id).single();
+            if (custData && isConnected) {
+                await sendPostOrderFollowUp(client, custData.phone_number, result.orderId, supabase);
+            }
+
             console.log(`[MEDIA-SCAN] ✅ Nomor pesanan ditemukan: ${result.orderId}`);
             return res.json({ success: true, found: true, order_id: result.orderId });
         }
@@ -673,7 +680,7 @@ app.get('/api/ai/config', async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('ai_config')
-            .select('is_enabled, system_prompt, order_image_url')
+            .select('is_enabled, system_prompt, order_image_url, post_order_message')
             .eq('id', 1)
             .single();
 
@@ -686,11 +693,12 @@ app.get('/api/ai/config', async (req, res) => {
 
 // POST /api/ai/config — Update toggle ON/OFF dan system prompt
 app.post('/api/ai/config', async (req, res) => {
-    const { is_enabled, system_prompt } = req.body;
+    const { is_enabled, system_prompt, post_order_message } = req.body;
     try {
         const updates = { updated_at: new Date().toISOString() };
         if (typeof is_enabled === 'boolean') updates.is_enabled = is_enabled;
         if (typeof system_prompt === 'string' && system_prompt.trim()) updates.system_prompt = system_prompt.trim();
+        if (typeof post_order_message === 'string') updates.post_order_message = post_order_message.trim();
 
         const { error } = await supabase
             .from('ai_config')

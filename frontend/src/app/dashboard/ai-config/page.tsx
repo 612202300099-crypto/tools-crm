@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Bot, Power, Upload, Save, Image, AlertTriangle, CheckCircle, Loader2, RefreshCw } from "lucide-react";
+import { Bot, Power, Upload, Save, Image, AlertTriangle, CheckCircle, Loader2, RefreshCw, Video, Link as LinkIcon } from "lucide-react";
 
 const API_URL = "https://api-wa.parecustom.com";
 
@@ -15,10 +15,18 @@ Aturan penting:
 - Jika customer bertanya soal lain, tetap arahkan ke nomor pesanan dulu
 - Jangan terlalu panjang, cukup 1-3 kalimat per balasan`;
 
+const DEFAULT_POST_ORDER = `Terima kasih kak! Nomor pesanan {order_id} sudah kami terima ✅
+
+Sebelum kirim foto, wajib lihat dulu ya kak ketentuan dan cara kirim fotonya di video ini:
+https://vt.tiktok.com/xxxxx
+
+Biar fotonya nggak perlu kirim ulang ya kak 🙏😊`;
+
 type Config = {
   is_enabled: boolean;
   system_prompt: string;
   order_image_url: string | null;
+  post_order_message: string;
 };
 
 export default function AIConfigPage() {
@@ -26,9 +34,11 @@ export default function AIConfigPage() {
     is_enabled: false,
     system_prompt: DEFAULT_PROMPT,
     order_image_url: null,
+    post_order_message: DEFAULT_POST_ORDER,
   });
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [savingPostOrder, setSavingPostOrder] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [toast, setToast] = useState<{ type: "success" | "error"; msg: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -44,7 +54,12 @@ export default function AIConfigPage() {
       const res = await fetch(`${API_URL}/api/ai/config`);
       if (!res.ok) throw new Error("Gagal memuat konfigurasi");
       const { config: data } = await res.json();
-      setConfig(data);
+      setConfig({
+        is_enabled: data.is_enabled ?? false,
+        system_prompt: data.system_prompt ?? DEFAULT_PROMPT,
+        order_image_url: data.order_image_url ?? null,
+        post_order_message: data.post_order_message ?? DEFAULT_POST_ORDER,
+      });
     } catch (err: any) {
       showToast("error", "Gagal memuat konfigurasi dari server: " + err.message);
     } finally {
@@ -87,6 +102,23 @@ export default function AIConfigPage() {
       showToast("error", "Gagal menyimpan instruksi bot.");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleSavePostOrder = async () => {
+    setSavingPostOrder(true);
+    try {
+      const res = await fetch(`${API_URL}/api/ai/config`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ post_order_message: config.post_order_message }),
+      });
+      if (!res.ok) throw new Error();
+      showToast("success", "Pesan follow-up berhasil disimpan! 📋");
+    } catch {
+      showToast("error", "Gagal menyimpan pesan follow-up.");
+    } finally {
+      setSavingPostOrder(false);
     }
   };
 
@@ -182,7 +214,6 @@ export default function AIConfigPage() {
                   {config.is_enabled ? "Bot sedang merespons customer" : "Bot tidak aktif"}
                 </div>
               </div>
-              {/* Toggle Switch */}
               <button
                 onClick={handleToggle}
                 className={`relative w-14 h-7 rounded-full transition-all duration-300 focus:outline-none focus:ring-4 ${
@@ -203,7 +234,7 @@ export default function AIConfigPage() {
             <div className="mt-4 p-3 bg-amber-50 rounded-xl border border-amber-100">
               <p className="text-xs font-medium text-amber-700 leading-relaxed">
                 💡 <strong>Cara kerja:</strong> Bot aktif untuk semua customer yang belum punya nomor pesanan. 
-                Begitu customer kirim 18 digit angka, bot <strong>otomatis berhenti</strong>.
+                Begitu customer kirim 18 digit angka, bot <strong>mengirim ketentuan foto lalu berhenti</strong>.
               </p>
             </div>
           </div>
@@ -217,7 +248,6 @@ export default function AIConfigPage() {
               Gambar ini dikirim ke customer <strong>sekali</strong> di balasan pertama bot, sebagai panduan visual cara menemukan nomor pesanan.
             </p>
 
-            {/* Preview Gambar */}
             {config.order_image_url ? (
               <div className="relative group mb-4">
                 <img
@@ -236,7 +266,6 @@ export default function AIConfigPage() {
               </div>
             )}
 
-            {/* Tombol Upload */}
             <input
               type="file"
               accept="image/*"
@@ -269,47 +298,102 @@ export default function AIConfigPage() {
           </div>
         </div>
 
-        {/* ── Kolom Kanan: System Prompt Editor ── */}
-        <div className="lg:col-span-2 bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-sm font-black uppercase tracking-wider text-gray-500">
-              Instruksi Kepribadian Bot (System Prompt)
-            </h2>
-            <button
-              onClick={() => setConfig((prev) => ({ ...prev, system_prompt: DEFAULT_PROMPT }))}
-              className="text-xs font-bold text-gray-400 hover:text-gray-700 transition underline underline-offset-2"
-            >
-              Reset ke Default
-            </button>
-          </div>
-          <p className="text-xs text-gray-400 font-medium mb-4 leading-relaxed">
-            Ini adalah "jiwa" bot Anda. Tulis instruksi dengan jelas bagaimana bot harus berperilaku, berbicara, dan merespons customer.
-          </p>
-
-          <textarea
-            value={config.system_prompt}
-            onChange={(e) => setConfig((prev) => ({ ...prev, system_prompt: e.target.value }))}
-            rows={16}
-            placeholder="Tulis instruksi kepribadian bot di sini..."
-            className="flex-1 w-full p-4 font-mono text-sm text-gray-800 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-violet-400 resize-none leading-relaxed transition"
-          />
-
-          <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
-            <p className="text-xs text-gray-400 font-medium">
-              {config.system_prompt.length} karakter • Perubahan langsung aktif tanpa restart server
+        {/* ── Kolom Kanan: System Prompt + Post-Order Message ── */}
+        <div className="lg:col-span-2 flex flex-col gap-6">
+          
+          {/* Card: System Prompt Editor */}
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-6 flex flex-col">
+            <div className="flex items-center justify-between mb-1">
+              <h2 className="text-sm font-black uppercase tracking-wider text-gray-500">
+                Instruksi Kepribadian Bot (System Prompt)
+              </h2>
+              <button
+                onClick={() => setConfig((prev) => ({ ...prev, system_prompt: DEFAULT_PROMPT }))}
+                className="text-xs font-bold text-gray-400 hover:text-gray-700 transition underline underline-offset-2"
+              >
+                Reset ke Default
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 font-medium mb-4 leading-relaxed">
+              Ini adalah &quot;jiwa&quot; bot Anda. Tulis instruksi dengan jelas bagaimana bot harus berperilaku saat meminta nomor pesanan.
             </p>
-            <button
-              onClick={handleSavePrompt}
-              disabled={saving}
-              className="flex items-center space-x-2 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white px-6 py-2.5 rounded-xl text-sm font-bold shadow-md shadow-violet-200 transition"
-            >
-              {saving ? (
-                <Loader2 size={16} className="animate-spin" />
-              ) : (
-                <Save size={16} />
-              )}
-              <span>{saving ? "Menyimpan..." : "Simpan Instruksi"}</span>
-            </button>
+
+            <textarea
+              value={config.system_prompt}
+              onChange={(e) => setConfig((prev) => ({ ...prev, system_prompt: e.target.value }))}
+              rows={10}
+              placeholder="Tulis instruksi kepribadian bot di sini..."
+              className="flex-1 w-full p-4 font-mono text-sm text-gray-800 bg-gray-50 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-violet-400 focus:border-violet-400 resize-none leading-relaxed transition"
+            />
+
+            <div className="flex items-center justify-between mt-4 pt-4 border-t border-gray-100">
+              <p className="text-xs text-gray-400 font-medium">
+                {config.system_prompt.length} karakter • Perubahan langsung aktif tanpa restart server
+              </p>
+              <button
+                onClick={handleSavePrompt}
+                disabled={saving}
+                className="flex items-center space-x-2 bg-violet-600 hover:bg-violet-700 disabled:bg-violet-300 text-white px-6 py-2.5 rounded-xl text-sm font-bold shadow-md shadow-violet-200 transition"
+              >
+                {saving ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Save size={16} />
+                )}
+                <span>{saving ? "Menyimpan..." : "Simpan Instruksi"}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Card: Post-Order Follow-Up Message */}
+          <div className="bg-white rounded-2xl border-2 border-blue-100 shadow-sm p-6 flex flex-col">
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center space-x-2">
+                <div className="w-7 h-7 rounded-lg bg-blue-100 flex items-center justify-center">
+                  <Video size={14} className="text-blue-600" />
+                </div>
+                <h2 className="text-sm font-black uppercase tracking-wider text-gray-500">
+                  Pesan Follow-Up Setelah Order
+                </h2>
+              </div>
+              <button
+                onClick={() => setConfig((prev) => ({ ...prev, post_order_message: DEFAULT_POST_ORDER }))}
+                className="text-xs font-bold text-gray-400 hover:text-gray-700 transition underline underline-offset-2"
+              >
+                Reset ke Default
+              </button>
+            </div>
+            <p className="text-xs text-gray-400 font-medium mb-4 leading-relaxed">
+              Pesan ini <strong>otomatis dikirim</strong> ke customer setelah nomor pesanan ditemukan (baik dari chat maupun dari Scan AI). 
+              Gunakan <code className="bg-gray-100 px-1.5 py-0.5 rounded text-violet-600 font-bold">{'{order_id}'}</code> sebagai placeholder nomor pesanan.
+            </p>
+
+            <textarea
+              value={config.post_order_message}
+              onChange={(e) => setConfig((prev) => ({ ...prev, post_order_message: e.target.value }))}
+              rows={7}
+              placeholder="Tulis pesan follow-up di sini... (Masukkan link TikTok, ketentuan, dll)"
+              className="flex-1 w-full p-4 font-mono text-sm text-gray-800 bg-blue-50/50 border border-blue-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400 focus:border-blue-400 resize-none leading-relaxed transition"
+            />
+
+            <div className="flex items-center justify-between mt-4 pt-4 border-t border-blue-100">
+              <div className="flex items-center space-x-2 text-xs text-blue-600 font-medium">
+                <LinkIcon size={12} />
+                <span>Paste link TikTok langsung di pesan agar bisa diklik customer</span>
+              </div>
+              <button
+                onClick={handleSavePostOrder}
+                disabled={savingPostOrder}
+                className="flex items-center space-x-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-300 text-white px-6 py-2.5 rounded-xl text-sm font-bold shadow-md shadow-blue-200 transition"
+              >
+                {savingPostOrder ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Save size={16} />
+                )}
+                <span>{savingPostOrder ? "Menyimpan..." : "Simpan Follow-Up"}</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -320,12 +404,13 @@ export default function AIConfigPage() {
           <Bot size={16} />
           <span>Alur Kerja Bot Secara Otomatis</span>
         </h3>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           {[
             { step: "1", label: "Customer chat masuk", icon: "💬" },
             { step: "2", label: "Cek nomor pesanan sudah ada?", icon: "🔍" },
             { step: "3", label: "Jika belum → AI balas + kirim gambar (sekali)", icon: "🤖" },
-            { step: "4", label: "Customer kirim 18 digit → Bot BERHENTI", icon: "✅" },
+            { step: "4", label: "Customer kirim 18 digit → Nomor disimpan", icon: "📝" },
+            { step: "5", label: "Bot kirim ketentuan + link video → Selesai", icon: "✅" },
           ].map((item) => (
             <div key={item.step} className="bg-white/70 rounded-xl p-3 border border-violet-100/80">
               <div className="text-2xl mb-1">{item.icon}</div>
