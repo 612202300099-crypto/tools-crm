@@ -344,7 +344,7 @@ client.on('ready', async () => {
                 try {
                     // Beri jeda 2 detik tiap chat agar WA Web tidak hang (mencegah error waitForChatLoading)
                     await sleep(2000);
-                    const historyMessages = await chat.fetchMessages({ limit: 50 });
+                    const historyMessages = await withTimeout(chat.fetchMessages({ limit: 50 }), 30000, 'fetchMessages_startup');
                     for (const msg of historyMessages) {
                         if (msg.timestamp >= limitTimestamp) {
                             processedCount++;
@@ -411,11 +411,11 @@ client.on('message_revoke_everyone', async (after, before) => {
 
         // Poin 1 Lanjutan: Validasi Ruang Obrolan
         try {
-            const chat = await after.getChat();
+            const chat = await withTimeout(after.getChat(), 30000, 'getChat_revoke');
             if (chat) {
                 let checkPhone = chat.id.user;
-                const contact = await chat.getContact();
-                if (contact && contact.number) checkPhone = contact.number;
+                const contact = await withTimeout(chat.getContact(), 4000, 'getContact_revoke');
+                if (contact && contact.number) checkPhone = String(contact.number).replace(/\D/g, '');
                 
                 const { data: custInfo } = await supabase.from('customers').select('id').eq('phone_number', checkPhone).single();
                 if (custInfo && custInfo.id !== dbMsg.customer_id) {
@@ -468,7 +468,7 @@ app.post('/api/wa/send', async (req, res) => {
     
     try {
         const chatId = phone_number + '@c.us';
-        await client.sendMessage(chatId, message);
+        await withTimeout(client.sendMessage(chatId, message), 30000, 'sendMessage_API');
 
         if (customer_id) {
            const { error: insErr } = await supabase.from('messages').insert({
@@ -494,7 +494,7 @@ app.post('/api/wa/resync', async (req, res) => {
     
     try {
         const chatId = phone_number + '@c.us';
-        const chat = await client.getChatById(chatId);
+        const chat = await withTimeout(client.getChatById(chatId), 30000, 'getChatById_API');
         
         console.log(`[RESYNC - SAFE MODE] Memulai penyisiran ulang history untuk: ${phone_number}`);
         // KOREKSI: Kita TIDAK LAGI MENGHAPUS data lama. 
@@ -502,7 +502,7 @@ app.post('/api/wa/resync', async (req, res) => {
         // Ini mencegah resiko chat hilang jika koneksi terputus di tengah jalan.
 
         console.log(`[RESYNC] Mendownload ulang history 1000 pesan terakhir...`);
-        const historyMessages = await chat.fetchMessages({ limit: 1000 });
+        const historyMessages = await withTimeout(chat.fetchMessages({ limit: 1000 }), 60000, 'fetchMessages_API');
         
         let count = 0;
         for (const msg of historyMessages) {
