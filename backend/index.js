@@ -97,7 +97,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         let contactPushname = 'Pelanggan Baru';
         
         try {
-            const contact = await withTimeout(chat.getContact(), 15000, 'getContact');
+            // [FIX] Turunkan timeout getContact jadi 4 detik agar antrian tidak macet jika LID sulit/gagal di-resolve
+            const contact = await withTimeout(chat.getContact(), 4000, 'getContact');
             if (contact) {
                 if (contact.number) customerPhoneNumber = String(contact.number).replace(/\D/g, '');
                 if (contact.pushname) contactPushname = contact.pushname;
@@ -115,10 +116,10 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
              return;
         }
         
-        // PENTING: Jika nomor >= 15 digit (sangat panjang seperti 182996376277186) DAN asalnya dari jaringan LID,
-        // Ini berarti kita GAGAL mendapatkan nomor HP aslinya. Kita tolak agar tidak jadi Customer Siluman!
-        if (customerPhoneNumber.length >= 15 && isLidNetwork) {
-             console.log(`[DEBUG] 🛑 [BLOCK] Mencegah penciptaan Data Customer Siluman dari ID Panjang Asli: ${customerPhoneNumber}`);
+        // PENTING: Mencegah penciptaan Data Customer Siluman dari jaringan LID.
+        // Jika asalnya dari LID dan kita gagal meresolve nomor HP aslinya (berarti nomor hasil sama dengan string angka LID itu sendiri)
+        if (isLidNetwork && customerPhoneNumber === String(chat.id.user).replace(/\D/g, '')) {
+             console.log(`[DEBUG] 🛑 [BLOCK] Mengabaikan pesan dari LID karena gagal di-resolve ke nomor HP: ${customerPhoneNumber}`);
              return;
         }
 
@@ -252,7 +253,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             // [FIX] Hanya simpan ke galeri dan update status jika media berasal dari CUSTOMER (!isFromMe)
             if (!isFromMe) {
                 console.log(`📥 Mengunduh media dari customer ${customerPhoneNumber}...`);
-                const media = await withTimeout(message.downloadMedia(), 60000, 'downloadMedia');
+                const media = await withTimeout(message.downloadMedia(), 25000, 'downloadMedia');
                 
                 if (!media || !media.data) {
                     console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
@@ -338,7 +339,8 @@ client.on('ready', async () => {
         
         let processedCount = 0;
         for (const chat of chats) {
-            if (!chat.isGroup) {
+            // [FIX] Abaikan "status" chat agar tidak memicu error 'waitForChatLoading' dari puppeteer
+            if (!chat.isGroup && chat.id.user !== 'status') {
                 try {
                     // Beri jeda 2 detik tiap chat agar WA Web tidak hang (mencegah error waitForChatLoading)
                     await sleep(2000);
