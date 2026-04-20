@@ -350,12 +350,13 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
 
                         const publicUrl = `${PUBLIC_API_URL}/uploads/${fileName}`;
 
-                        // Simpan ke database media
+                        // Simpan ke database media (Gunakan kolom yang benar sesuai skema: customer_id, file_url)
                         await supabase.from('media').insert({
+                             customer_id: customer.id,
                              message_id: messageRecord.id,
+                             file_url: publicUrl,
                              file_name: fileName,
-                             public_url: publicUrl,
-                             mimetype: media.mimetype
+                             created_at: msgTimestamp
                         });
 
                         // Sundul status customer ke 'SUDAH_KIRIM_FOTO'
