@@ -12,6 +12,8 @@ const cleanupService = require('./services/cleanup_service');
 const StabilityManager = require('./services/stability_manager');
 const { checkAndRespond, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 const app = express();
 app.use(cors());
 app.use(express.json());
