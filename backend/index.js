@@ -126,6 +126,10 @@ async function hydrateContactCache() {
 async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
         const isFromMe = message.fromMe;
+        const waMessageId = message.id._serialized;
+        const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
+        const secureMessageHash = message.id.id || waMessageId.split('_').pop();
+
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
         
         // Kita tidak boleh memblokir `message.from` berbasis @lid secara absolut di sini 
@@ -265,11 +269,6 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         }
         
         console.log(`[DEBUG] 📬 Lolos! Memasukkan ke tabel messages (Duplicate Check run...)`);
-
-        // KODE PELACAK INTERNAL WA (SANGAT UNIK PER FOTO)
-        const waMessageId = message.id._serialized;
-        const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
-        const secureMessageHash = message.id.id || waMessageId.split('_').pop();
 
         // 0. ANTI-DUPLIKAT (Cek Kesamaan Kode KTP WA_ID Asli menggunakan Constraint Hash Lintas Prefix)
         let isDuplicate = false;
