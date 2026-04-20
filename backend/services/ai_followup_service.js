@@ -207,8 +207,8 @@ async function checkAndRespond(waClient, customer, message, supabase) {
         const chatId = customer.phone_number + '@c.us';
         await withTimeout(
             waClient.sendMessage(chatId, aiReply),
-            30000,
-            'WA sendMessage AI reply'
+            60000,
+            'WA_sendMessage_AI_reply'
         );
         console.log(`[AI-BOT] 💬 Balasan terkirim ke ${customer.phone_number}: "${aiReply.substring(0, 60)}..."`);
 
@@ -234,20 +234,20 @@ async function checkAndRespond(waClient, customer, message, supabase) {
                         const media = MessageMedia.fromFilePath(localPath);
                         await withTimeout(
                             waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' }),
-                            30000,
-                            'WA sendImage contoh'
+                            60000,
+                            'WA_sendImage_contoh'
                         );
                         console.log(`[AI-BOT] 🖼️ Gambar contoh berhasil dikirim ke ${customer.phone_number}`);
                     } else {
                         const media = await withTimeout(
                             MessageMedia.fromUrl(config.order_image_url, { unsafeMime: true }),
-                            30000,
-                            'WA fromUrl fallback'
+                            60000,
+                            'WA_fromUrl_fallback'
                         );
                         await withTimeout(
                             waClient.sendMessage(chatId, media, { caption: 'Contoh tampilan nomor pesanan 👆' }),
-                            30000,
-                            'WA sendImage URL fallback'
+                            60000,
+                            'WA_sendImage_URL_fallback'
                         );
                         console.log(`[AI-BOT] 🖼️ Gambar contoh (URL-Fallback) berhasil dikirim ke ${customer.phone_number}`);
                     }

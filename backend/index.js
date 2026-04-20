@@ -317,28 +317,29 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             if(!msgError) {
                 messageRecord = msgData;
             } else {
-                console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message, msgError.details);
+                console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message);
             }
         }
 
         if (message.hasMedia) {
             // [FIX] Hanya simpan ke galeri dan update status jika media berasal dari CUSTOMER (!isFromMe)
             if (!isFromMe) {
-                console.log(`📥 Mengunduh media dari customer ${customerPhoneNumber}...`);
-                const media = await withTimeout(message.downloadMedia(), 25000, 'downloadMedia');
-                
-                if (!media || !media.data) {
-                    console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
-                } else {
-                    const buffer = Buffer.from(media.data, 'base64');
-                    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-                    let fileExt = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
-                    if (fileExt && fileExt.includes(';')) fileExt = fileExt.split(';')[0];
-                    const ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
+                try {
+                    console.log(`📥 Mengunduh media dari customer ${customerPhoneNumber}...`);
+                    // [STABILISASI] Batas waktu download dinaikkan ke 60 detik (Point 5). 
+                    const media = await withTimeout(message.downloadMedia(), 55000, 'downloadMedia');
                     
-                    const fileName = `${customer.id}/foto-${uniqueSuffix}.${ext}`;
+                    if (!media || !media.data) {
+                        console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
+                    } else {
+                        const buffer = Buffer.from(media.data, 'base64');
+                        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+                        let fileExt = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
+                        if (fileExt && fileExt.includes(';')) fileExt = fileExt.split(';')[0];
+                        const ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
+                        
+                        const fileName = `${customer.id}/foto-${uniqueSuffix}.${ext}`;
 
-                    try {
                         const uploadsDir = path.join(__dirname, 'uploads', customer.id.toString());
                         if (!fs.existsSync(uploadsDir)) {
                             fs.mkdirSync(uploadsDir, { recursive: true });
@@ -349,26 +350,21 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
 
                         const publicUrl = `${PUBLIC_API_URL}/uploads/${fileName}`;
 
-                        await supabase
-                            .from('media')
-                            .insert({
-                                customer_id: customer.id,
-                                message_id: messageRecord ? messageRecord.id : null,
-                                file_url: publicUrl,
-                                file_name: fileName,
-                                created_at: msgTimestamp
-                            });
+                        // Simpan ke database media
+                        await supabase.from('media').insert({
+                             message_id: messageRecord.id,
+                             file_name: fileName,
+                             public_url: publicUrl,
+                             mimetype: media.mimetype
+                        });
 
-                        if (customer.status === 'BELUM_KIRIM_FOTO') {
-                            await supabase
-                               .from('customers')
-                               .update({ status: 'SUDAH_KIRIM_FOTO' })
-                               .eq('id', customer.id);
-                        }
-                        console.log(`✅ Foto tersimpan di LOKAL VPS dari customer ${customerPhoneNumber}`);
-                    } catch (uploadError) {
-                        console.error('❌ GAGAL MENYIMPAN FOTO KE VPS:', uploadError.message);
+                        // Sundul status customer ke 'SUDAH_KIRIM_FOTO'
+                        await supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', customer.id);
+                        console.log(`✅ Media tersimpan & status diperbarui untuk ${customerPhoneNumber}`);
                     }
+                } catch (mediaErr) {
+                    // [STABILISASI] Jika media gagal, JANGAN hentikan flow utama (AI tetap harus membalas)
+                    console.error(`⚠️ [MEDIA-FAIL] Gagal memproses media untuk ${customerPhoneNumber} (Flow berlanjut):`, mediaErr.message);
                 }
             } else {
                 console.log(`[DEBUG] ⏭️ Media dari Bot/Admin (fromMe) dideteksi. Lewati galeri & status update.`);
@@ -579,6 +575,8 @@ app.post('/api/wa/deep-resync', async (req, res) => {
                         // skipCustomerUpdate kita set false agar 'created_at' customer di-update sesuai waktu pesan asli
                         await processMessageCommand(msg, false);
                         totalProcessed++;
+                        // [STABILISASI] Throttling antar pesan (500ms) agar Puppeteer tidak hang
+                        await new Promise(r => setTimeout(r, 500));
                     }
                 }
             } catch (chatErr) {
