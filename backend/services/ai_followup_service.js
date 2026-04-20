@@ -17,8 +17,8 @@ const aiClient = new OpenAI({
     baseURL: isUsingGroq ? "https://api.groq.com/openai/v1" : undefined
 });
 
-const AI_MODEL = isUsingGroq ? "llama-3.1-70b-versatile" : "gpt-4o-mini";
-console.log(`[AI-BOT] 🚀 Intelligence Engine: ${isUsingGroq ? 'GROQ (Llama 3.1 70B)' : 'OPENAI (GPT-4o-Mini)'}`);
+const AI_MODEL = isUsingGroq ? "llama-3.3-70b-versatile" : "gpt-4o-mini";
+console.log(`[AI-BOT] 🚀 Intelligence Engine: ${isUsingGroq ? 'GROQ (Llama 3.3 70B)' : 'OPENAI (GPT-4o-Mini)'}`);
 
 // ─── Timeout Utility ──────────────────────────────────────────────────────────
 // Membungkus promise dengan batas waktu agar tidak hang selamanya.
@@ -138,8 +138,8 @@ async function sendPostOrderFollowUp(waClient, phoneNumber, orderId, supabase) {
 
         await withTimeout(
             waClient.sendMessage(chatId, finalMessage),
-            30000,
-            'WA sendPostOrderFollowUp'
+            60000,
+            'WA_sendPostOrderFollowUp'
         );
 
         console.log(`[AI-BOT] 📋 Pesan follow-up (ketentuan + link) terkirim ke ${phoneNumber}`);
