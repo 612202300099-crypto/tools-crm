@@ -97,14 +97,15 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         let contactPushname = 'Pelanggan Baru';
         
         try {
-            // [FIX] Turunkan timeout getContact jadi 4 detik agar antrian tidak macet jika LID sulit/gagal di-resolve
-            const contact = await withTimeout(chat.getContact(), 4000, 'getContact');
+            // [OPTIMASI] Naikkan timeout getContact jadi 10 detik agar LID lebih stabil ter-resolve,
+            // namun tetap gunakan Safe-Fallback jika macet.
+            const contact = await withTimeout(chat.getContact(), 10000, 'getContact');
             if (contact) {
                 if (contact.number) customerPhoneNumber = String(contact.number).replace(/\D/g, '');
                 if (contact.pushname) contactPushname = contact.pushname;
             }
         } catch (err) {
-             console.error("[TIMEOUT-GUARD] getContact gagal/timeout (Fallback berjalan):", err.message);
+             console.error("[TIMEOUT-GUARD] getContact fallback aktif (Resolving LID mungkin gagal):", err.message);
         }
 
         if (!customerPhoneNumber) customerPhoneNumber = String(chat.id.user).replace(/\D/g, ''); // Fallback string regex aman
@@ -327,36 +328,61 @@ client.on('ready', async () => {
     qrCodeData = '';
     isConnected = true;
 
-    // [STARTUP SYNC]
+    // [STARTUP SYNC] - Improved & Robust
     try {
         const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR (limit 50/chat)...');
-        const chats = await client.getChats();
+        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR...');
+        
+        let chats = [];
+        try {
+            chats = await withTimeout(client.getChats(), 60000, 'getChats_startup');
+        } catch (getChatsErr) {
+            console.error('❌ Gagal mengambil daftar chat saat startup:', getChatsErr.message);
+            return;
+        }
         
         const targetDate = new Date();
         targetDate.setDate(targetDate.getDate() - 1);
         const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
         
         let processedCount = 0;
+        let errorCount = 0;
+
         for (const chat of chats) {
-            // [FIX] Abaikan "status" chat agar tidak memicu error 'waitForChatLoading' dari puppeteer
-            if (!chat.isGroup && chat.id.user !== 'status') {
-                try {
-                    // Beri jeda 2 detik tiap chat agar WA Web tidak hang (mencegah error waitForChatLoading)
-                    await sleep(2000);
-                    const historyMessages = await withTimeout(chat.fetchMessages({ limit: 50 }), 30000, 'fetchMessages_startup');
-                    for (const msg of historyMessages) {
-                        if (msg.timestamp >= limitTimestamp) {
-                            processedCount++;
-                            await processMessageCommand(msg, true);
-                        }
-                    }
-                } catch (chatErr) {
-                    console.error(`⚠️ Gagal menyisir chat ${chat.id.user}:`, chatErr.message);
+            // [SHIELD] Abaikan status, grup, dan chat kosong
+            if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
+
+            try {
+                // Jeda 1.5 detik agar tidak memicu proteksi internal WhatsApp/Puppeteer
+                await sleep(1500);
+
+                // Cek pesan terakhir sebelum fetch (Optimasi: Jika pesan terakhir sudah lama, skip)
+                if (chat.lastMessage && chat.lastMessage.timestamp < limitTimestamp) {
+                    continue;
                 }
+
+                // FETCH MESSAGES dengan proteksi error waitForChatLoading
+                const historyMessages = await withTimeout(chat.fetchMessages({ limit: 50 }), 30000, 'fetchMessages_startup')
+                    .catch(err => {
+                        if (err.message.includes('waitForChatLoading') || err.message.includes('undefined')) {
+                            console.log(`ℹ️ Skip chat ${chat.id.user}: WhatsApp Web belum siap (waitForChatLoading).`);
+                            return [];
+                        }
+                        throw err;
+                    });
+
+                for (const msg of historyMessages) {
+                    if (msg.timestamp >= limitTimestamp) {
+                        processedCount++;
+                        await processMessageCommand(msg, true);
+                    }
+                }
+            } catch (chatErr) {
+                errorCount++;
+                console.error(`⚠️ Gagal menyisir chat ${chat.id.user}:`, chatErr.message);
             }
         }
-        console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal.`);
+        console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal. (Gagal: ${errorCount} chat)`);
     } catch (e) {
          console.error('⚠️ Gagal total sinkronisasi pesan offline:', e);
     }
@@ -449,6 +475,46 @@ client.on('message_revoke_everyone', async (after, before) => {
         console.log(`✅ [3-LAYER SYNC SUCCESS] Pesan Asli (Hash: ${targetHash}) resmi Lenyap & Soft-Deleted secara aman!`);
     } catch (e) {
         console.error('⚠️ Error Fatal memproses pesan Real-time Tarik (Revoke):', e.message);
+    }
+});
+
+// Deep Resync Endpoint: Untuk menangani gap waktu spesifik (seperti saat crash loop)
+app.post('/api/wa/deep-resync', async (req, res) => {
+    const { start_date, end_date } = req.body; // Format: '2026-04-19T19:00:00'
+    if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
+
+    try {
+        const startTs = Math.floor(new Date(start_date).getTime() / 1000);
+        const endTs = end_date ? Math.floor(new Date(end_date).getTime() / 1000) : Math.floor(Date.now() / 1000);
+
+        console.log(`[DEEP-RESYNC] Memulai penyisiran paksa dari ${start_date} hingga ${end_date || 'Sekarang'}...`);
+        const chats = await client.getChats();
+        
+        let totalProcessed = 0;
+        for (const chat of chats) {
+            if (chat.isGroup || chat.id.user === 'status') continue;
+            
+            // Skip chat yang tidak ada aktifitas di range tersebut (jika lastMessage tersedia)
+            if (chat.lastMessage && chat.lastMessage.timestamp < startTs) continue;
+
+            console.log(`[DEEP-RESYNC] Menyisir chat ${chat.id.user}...`);
+            try {
+                const messages = await withTimeout(chat.fetchMessages({ limit: 100 }), 30000, 'fetchMessages_deep');
+                for (const msg of messages) {
+                    if (msg.timestamp >= startTs && msg.timestamp <= endTs) {
+                        await processMessageCommand(msg, true);
+                        totalProcessed++;
+                    }
+                }
+            } catch (chatErr) {
+                console.error(`[DEEP-RESYNC ERROR] Chat ${chat.id.user}:`, chatErr.message);
+            }
+            await new Promise(r => setTimeout(r, 1000)); // Rate limiting
+        }
+
+        res.json({ success: true, processed: totalProcessed });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
