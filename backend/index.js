@@ -236,7 +236,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
                 .insert({
                     phone_number: customerPhoneNumber,
                     name: contactPushname,
-                    status: 'BELUM_KIRIM_FOTO'
+                    status: 'BELUM_KIRIM_FOTO',
+                    created_at: msgTimestamp // Gunakan waktu pesan asli
                 })
                 .select()
                 .single();
@@ -252,9 +253,15 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             } else {
                 customer = newCustomer;
             }
-        } else if (!skipCustomerUpdate) {
-            // Pelanggan sudah ada — sundul ke atas di Inbox (Hanya jika bukan saat resync massal)
-            await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer.id);
+        } else {
+            // Pelanggan sudah ada — Update 'Last Activity' (created_at) jika pesan ini lebih baru
+            // Saat resync massal, kita gunakan waktu pesan asli, bukan waktu 'SEKARANG'.
+            const currentActivity = new Date(customer.created_at).getTime();
+            const msgTime = new Date(msgTimestamp).getTime();
+
+            if (msgTime > currentActivity) {
+                await supabase.from('customers').update({ created_at: msgTimestamp }).eq('id', customer.id);
+            }
         }
         
         console.log(`[DEBUG] 📬 Lolos! Memasukkan ke tabel messages (Duplicate Check run...)`);
@@ -570,7 +577,8 @@ app.post('/api/wa/deep-resync', async (req, res) => {
                 const messages = await withTimeout(chat.fetchMessages({ limit: 100 }), 30000, 'fetchMessages_deep');
                 for (const msg of messages) {
                     if (msg.timestamp >= startTs && msg.timestamp <= endTs) {
-                        await processMessageCommand(msg, true);
+                        // skipCustomerUpdate kita set false agar 'created_at' customer di-update sesuai waktu pesan asli
+                        await processMessageCommand(msg, false);
                         totalProcessed++;
                     }
                 }
