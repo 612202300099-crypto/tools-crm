@@ -9,10 +9,16 @@ const OpenAI = require('openai');
 const path = require('path');
 const fs = require('fs');
 
-// ─── Inisialisasi Client OpenAI ───────────────────────────────────────────────
-const openaiClient = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+// ─── Inisialisasi Client Intelijen (Dukungan Multi-Provider: Groq / OpenAI) ──────
+const isUsingGroq = !!process.env.GROQ_API_KEY;
+
+const aiClient = new OpenAI({
+    apiKey: process.env.GROQ_API_KEY || process.env.OPENAI_API_KEY,
+    baseURL: isUsingGroq ? "https://api.groq.com/openai/v1" : undefined
 });
+
+const AI_MODEL = isUsingGroq ? "llama-3.1-70b-versatile" : "gpt-4o-mini";
+console.log(`[AI-BOT] 🚀 Intelligence Engine: ${isUsingGroq ? 'GROQ (Llama 3.1 70B)' : 'OPENAI (GPT-4o-Mini)'}`);
 
 // ─── Timeout Utility ──────────────────────────────────────────────────────────
 // Membungkus promise dengan batas waktu agar tidak hang selamanya.
@@ -70,7 +76,9 @@ function invalidateConfigCache() {
  */
 function detectOrderId(text) {
     if (!text) return null;
-    const match = text.match(/\b(\d{18})\b/);
+    // [BEST PRACTICE] Regex Inklusif: Mendukung Tokopedia (18), Shopee (14-16), TikTok (19)
+    // Mencari rentang 14 hingga 20 digit angka berurutan
+    const match = text.match(/\b(\d{14,20})\b/);
     return match ? match[1] : null;
 }
 
@@ -84,17 +92,23 @@ async function getAIReply(conversationHistory, systemPrompt) {
     ];
 
     const completion = await withTimeout(
-        openaiClient.chat.completions.create({
-            model: 'gpt-4o-mini',
+        aiClient.chat.completions.create({
+            model: AI_MODEL,
             messages,
-            max_tokens: 200,
+            max_tokens: 300,
             temperature: 0.7,
         }),
         30000, // 30 detik timeout
-        'OpenAI getAIReply'
+        'AI_Provider_getAIReply'
     );
 
-    return completion.choices[0]?.message?.content?.trim() || 'Halo kak, bisa kirim nomor pesanannya dulu ya 😊🙏';
+    const reply = completion.choices[0]?.message?.content?.trim();
+    
+    if (!reply) {
+        throw new Error("AI returned empty response");
+    }
+
+    return reply;
 }
 
 /**
