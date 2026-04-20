@@ -144,7 +144,6 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
         const isFromMe = message.fromMe;
         const waMessageId = message.id._serialized;
-        const waMessageId = message.id._serialized;
         const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
         const secureMessageHash = message.id.id || waMessageId.split('_').pop();
 
@@ -410,10 +409,16 @@ client.on('qr', (qr) => {
     console.log('New QR code generated - please scan');
 });
 
-client.on('ready', () => {
+client.on('ready', async () => {
     console.log('✅ WhatsApp Client is ready!');
     isConnected = true;
-        
+    qrCodeData = '';
+    
+    stability.start(); // Mulai pemantauan stabilitas
+    await hydrateContactCache();
+
+    // [STARTUP SYNC]
+    try {
         let chats = [];
         try {
             chats = await withTimeout(client.getChats(), 60000, 'getChats_startup');
@@ -465,7 +470,7 @@ client.on('ready', () => {
         }
         console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal. (Gagal: ${errorCount} chat)`);
     } catch (e) {
-         console.error('⚠️ Gagal total sinkronisasi pesan offline:', e);
+         console.error('⚠️ Gagal total sinkronisasi pesan offline:', e.message);
     }
 });
 
