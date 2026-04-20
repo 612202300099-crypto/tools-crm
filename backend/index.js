@@ -47,6 +47,7 @@ const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
 
 let qrCodeData = '';
 let isConnected = false;
+const contactCache = new Map(); // [GLOBAL CACHE] LID -> JID/Phone Mapping
 
 const client = new Client({
     authStrategy: new LocalAuth({ clientId: "crm-polaroid" }),
@@ -56,9 +57,75 @@ const client = new Client({
     }
 });
 
+// FUNGSI PENDUKUNG: Resolving LID ke Nomor HP asli secara agresif
+async function resolveIdentifier(id, chatObject = null) {
+    const serialized = id.includes('@') ? id : (id.includes('-') ? id + '@g.us' : id + '@c.us');
+    
+    // 1. Cek Cache Global
+    if (contactCache.has(serialized)) {
+        return contactCache.get(serialized);
+    }
+
+    // 2. Upayakan mapping LID via Official API (whatsapp-web.js dev version)
+    if (serialized.endsWith('@lid') && client.getContactLidAndPhone) {
+        try {
+            const mapping = await withTimeout(client.getContactLidAndPhone([serialized]), 5000, 'getContactLidAndPhone');
+            if (mapping && mapping.length > 0 && mapping[0].pn) {
+                const phone = mapping[0].pn.split('@')[0];
+                contactCache.set(serialized, phone);
+                return phone;
+            }
+        } catch (e) { /* silent */ }
+    }
+
+    // 3. Cek via getContact (bisa mentrigger sinkronisasi lokal)
+    if (chatObject && chatObject.getContact) {
+        try {
+            const contact = await withTimeout(chatObject.getContact(), 8000, 'getContact_resolve');
+            if (contact && contact.number && !contact.number.includes('lid')) {
+                const phone = String(contact.number).replace(/\D/g, '');
+                contactCache.set(serialized, phone);
+                return phone;
+            }
+        } catch (e) { /* silent */ }
+    }
+
+    // 4. Force Sync via client.getContactById
+    try {
+        const contact = await withTimeout(client.getContactById(serialized), 5000, 'getContactById_resolve');
+        if (contact && contact.number && !contact.number.includes('lid')) {
+            const phone = String(contact.number).replace(/\D/g, '');
+            contactCache.set(serialized, phone);
+            return phone;
+        }
+    } catch (e) { /* silent */ }
+
+    // Fallback: Kembalikan ID aslinya (biasanya ini angka LID panjang)
+    return serialized.split('@')[0].replace(/\D/g, '');
+}
+
+async function hydrateContactCache() {
+    console.log('📇 [HYDRATION] Membangun Cache Kontak Global...');
+    try {
+        const contacts = await client.getContacts();
+        let mapped = 0;
+        for (const c of contacts) {
+            if (c.id && c.number && !c.id.user.includes('lid') && !c.number.includes('lid')) {
+                // Mapping standard
+                contactCache.set(c.id._serialized, c.number);
+                mapped++;
+            }
+        }
+        console.log(`✅ [HYDRATION] Sukses membangun mapping ${mapped} kontak.`);
+    } catch (e) {
+        console.error('⚠️ [HYDRATION] Gagal sinkronisasi kontak:', e.message);
+    }
+}
+
 // CORE ENGINE HANDLER (Diekstrak agar bisa dipakai untuk pesan masuk realtime & sinkronisasi tertinggal)
 async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
+        const isFromMe = message.fromMe;
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
         
         // Kita tidak boleh memblokir `message.from` berbasis @lid secara absolut di sini 
@@ -92,23 +159,17 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         }
 
         // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli
-        const isFromMe = message.fromMe;
         let customerPhoneNumber = chat.id.user; // Fallback "628xxx" (tanpa @c.us)
         let contactPushname = 'Pelanggan Baru';
         
+        // [AGRESIVE RESOLVER] Memastikan kita dapat nomor asli, bukan LID
+        customerPhoneNumber = await resolveIdentifier(chat.id._serialized, chat);
+        
         try {
-            // [OPTIMASI] Naikkan timeout getContact jadi 10 detik agar LID lebih stabil ter-resolve,
-            // namun tetap gunakan Safe-Fallback jika macet.
-            const contact = await withTimeout(chat.getContact(), 10000, 'getContact');
-            if (contact) {
-                if (contact.number) customerPhoneNumber = String(contact.number).replace(/\D/g, '');
-                if (contact.pushname) contactPushname = contact.pushname;
-            }
-        } catch (err) {
-             console.error("[TIMEOUT-GUARD] getContact fallback aktif (Resolving LID mungkin gagal):", err.message);
-        }
-
-        if (!customerPhoneNumber) customerPhoneNumber = String(chat.id.user).replace(/\D/g, ''); // Fallback string regex aman
+            const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
+            if (contact && contact.pushname) contactPushname = contact.pushname;
+        } catch (err) { /* silent fallback untuk pushname */ }
+        
         console.log(`[DEBUG] 🔍 Resolved Phone Number: ${customerPhoneNumber} (LID Network: ${isLidNetwork})`);
 
         // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
@@ -118,10 +179,14 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         }
         
         // PENTING: Mencegah penciptaan Data Customer Siluman dari jaringan LID.
-        // Jika asalnya dari LID dan kita gagal meresolve nomor HP aslinya (berarti nomor hasil sama dengan string angka LID itu sendiri)
+        // KECUALI jika pesan tersebut memiliki MEDIA (Gambar/Foto). 
+        // Lebih baik punya data "Nomor Aneh" daripada pesanan/foto customer hilang sama sekali.
         if (isLidNetwork && customerPhoneNumber === String(chat.id.user).replace(/\D/g, '')) {
-             console.log(`[DEBUG] 🛑 [BLOCK] Mengabaikan pesan dari LID karena gagal di-resolve ke nomor HP: ${customerPhoneNumber}`);
-             return;
+             if (!message.hasMedia) {
+                 console.log(`[DEBUG] 🛑 [BLOCK] Mengabaikan teks LID tanpa media: ${customerPhoneNumber}`);
+                 return;
+             }
+             console.log(`[DEBUG] ⚠️ [ALLOW-BY-MEDIA] Meloloskan LID ${customerPhoneNumber} karena memiliki media penting.`);
         }
 
         // [HISTORY REVOKE SAFE-MODE] Jika sinkronisasi menangkap riwayat pesan ditarik (Poin 2)
@@ -327,6 +392,9 @@ client.on('ready', async () => {
     console.log('WhatsApp Client is ready!');
     qrCodeData = '';
     isConnected = true;
+
+    // Build Contact Cache
+    await hydrateContactCache();
 
     // [STARTUP SYNC] - Improved & Robust
     try {
