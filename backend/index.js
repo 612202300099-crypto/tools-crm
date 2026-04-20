@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 const cleanupService = require('./services/cleanup_service');
+const StabilityManager = require('./services/stability_manager');
 const { checkAndRespond, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
 const app = express();
@@ -53,8 +54,24 @@ const client = new Client({
     authStrategy: new LocalAuth({ clientId: "crm-polaroid" }),
     puppeteer: {
         headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote', '--single-process', '--disable-gpu']
+        // [BEST PRACTICE] Args dioptimasi untuk VPS RAM 2GB
+        args: [
+            '--no-sandbox', 
+            '--disable-setuid-sandbox', 
+            '--disable-dev-shm-usage', 
+            '--disable-accelerated-2d-canvas', 
+            '--no-first-run', 
+            '--no-zygote', 
+            '--disable-gpu',
+            '--disable-extensions',
+            '--js-flags="--max-old-space-size=1536"' // Limit heap memory
+        ]
     }
+});
+
+// [WATCHDOG] Inisialisasi Penjaga Stabilitas
+const stability = new StabilityManager(client, {
+    staleThreshold: 45 * 60 * 1000 // 45 menit tanpa aktifitas = Restart
 });
 
 // FUNGSI PENDUKUNG: Resolving LID ke Nomor HP asli secara agresif
@@ -127,9 +144,11 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
     try {
         const isFromMe = message.fromMe;
         const waMessageId = message.id._serialized;
+        const waMessageId = message.id._serialized;
         const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
         const secureMessageHash = message.id.id || waMessageId.split('_').pop();
 
+        stability.heartbeat(); // Kirim detak jantung ke Watchdog
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
         
         // Kita tidak boleh memblokir `message.from` berbasis @lid secara absolut di sini 
@@ -391,18 +410,9 @@ client.on('qr', (qr) => {
     console.log('New QR code generated - please scan');
 });
 
-client.on('ready', async () => {
-    console.log('WhatsApp Client is ready!');
-    qrCodeData = '';
+client.on('ready', () => {
+    console.log('✅ WhatsApp Client is ready!');
     isConnected = true;
-
-    // Build Contact Cache
-    await hydrateContactCache();
-
-    // [STARTUP SYNC] - Improved & Robust
-    try {
-        const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-        console.log('🔄 Menyisir pesan tertinggal dalam rentang 1 HARI TERAKHIR...');
         
         let chats = [];
         try {
@@ -549,47 +559,70 @@ client.on('message_revoke_everyone', async (after, before) => {
     }
 });
 
-// Deep Resync Endpoint: Untuk menangani gap waktu spesifik (seperti saat crash loop)
+// Deep Resync Endpoint: Menjalankan di Background agar tidak timeout di sisi Client
 app.post('/api/wa/deep-resync', async (req, res) => {
-    const { start_date, end_date } = req.body; // Format: '2026-04-19T19:00:00'
+    const { start_date, end_date } = req.body;
     if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
 
-    try {
-        const startTs = Math.floor(new Date(start_date).getTime() / 1000);
-        const endTs = end_date ? Math.floor(new Date(end_date).getTime() / 1000) : Math.floor(Date.now() / 1000);
+    const startTs = Math.floor(new Date(start_date).getTime() / 1000);
+    const endTs = end_date ? Math.floor(new Date(end_date).getTime() / 1000) : Math.floor(Date.now() / 1000);
 
-        console.log(`[DEEP-RESYNC] Memulai penyisiran paksa dari ${start_date} hingga ${end_date || 'Sekarang'}...`);
-        const chats = await client.getChats();
-        
-        let totalProcessed = 0;
-        for (const chat of chats) {
-            if (chat.isGroup || chat.id.user === 'status') continue;
-            
-            // Skip chat yang tidak ada aktifitas di range tersebut (jika lastMessage tersedia)
-            if (chat.lastMessage && chat.lastMessage.timestamp < startTs) continue;
+    // Kirim respons segera (Background Task)
+    res.json({ 
+        success: true, 
+        message: 'Deep Resync dimulai di latar belakang. Pantau progres di PM2 Logs.' 
+    });
 
-            console.log(`[DEEP-RESYNC] Menyisir chat ${chat.id.user}...`);
-            try {
-                const messages = await withTimeout(chat.fetchMessages({ limit: 100 }), 30000, 'fetchMessages_deep');
-                for (const msg of messages) {
-                    if (msg.timestamp >= startTs && msg.timestamp <= endTs) {
-                        // skipCustomerUpdate kita set false agar 'created_at' customer di-update sesuai waktu pesan asli
-                        await processMessageCommand(msg, false);
-                        totalProcessed++;
-                        // [STABILISASI] Throttling antar pesan (500ms) agar Puppeteer tidak hang
-                        await new Promise(r => setTimeout(r, 500));
+    // Jalankan proses di background
+    (async () => {
+        try {
+            console.log(`[BACKGROUND-RESYNC] 🚀 Memulai penyisiran...`);
+            const chats = await client.getChats();
+            let totalProcessed = 0;
+
+            for (const chat of chats) {
+                if (chat.isGroup || chat.id.user === 'status') continue;
+                if (chat.lastMessage && chat.lastMessage.timestamp < startTs) continue;
+
+                console.log(`[BACKGROUND-RESYNC] Menyisir chat ${chat.id.user}...`);
+                
+                // [STABILITAS] Retry loop untuk menangani Detached Frame
+                let success = false;
+                let retries = 0;
+                
+                while (!success && retries < 2) {
+                    try {
+                        // Re-fetch chat object untuk menyegarkan Frame context jika ini adalah retry
+                        const activeChat = (retries > 0) ? await client.getChatById(chat.id._serialized) : chat;
+                        const messages = await withTimeout(activeChat.fetchMessages({ limit: 100 }), 30000, 'fetchMessages_deep');
+                        
+                        for (const msg of messages) {
+                            if (msg.timestamp >= startTs && msg.timestamp <= endTs) {
+                                await processMessageCommand(msg, false);
+                                totalProcessed++;
+                                await new Promise(r => setTimeout(r, 500));
+                                stability.heartbeat();
+                            }
+                        }
+                        success = true;
+                    } catch (chatErr) {
+                        retries++;
+                        if (chatErr.message.includes('detached') || chatErr.message.includes('context')) {
+                             console.warn(`[WATCHDOG] ⚠️ Detached frame detected pada ${chat.id.user}. Retrying (${retries}/2)...`);
+                             await new Promise(r => setTimeout(r, 2000));
+                        } else {
+                             console.error(`[BACKGROUND-RESYNC ERROR] Chat ${chat.id.user}:`, chatErr.message);
+                             break; // Keluar dari loop retry untuk error lain
+                        }
                     }
                 }
-            } catch (chatErr) {
-                console.error(`[DEEP-RESYNC ERROR] Chat ${chat.id.user}:`, chatErr.message);
+                await new Promise(r => setTimeout(r, 1000));
             }
-            await new Promise(r => setTimeout(r, 1000)); // Rate limiting
+            console.log(`[BACKGROUND-RESYNC] ✅ SELESAI. Total ${totalProcessed} pesan diproses.`);
+        } catch (bgErr) {
+            console.error(`[BACKGROUND-RESYNC] ❌ Terhenti vatal:`, bgErr.message);
         }
-
-        res.json({ success: true, processed: totalProcessed });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
-    }
+    })();
 });
 
 client.initialize();
