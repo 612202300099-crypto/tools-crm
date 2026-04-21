@@ -14,6 +14,7 @@ class MediaQueueService {
         this.PUBLIC_API_URL = options.publicUrl || 'https://api-wa.parecustom.com';
         this.queueFile = path.join(__dirname, '../media_queue_state.json');
         this.queue = this.loadQueue();
+        this.currentJob = null; // Melacak pekerjaan yang sedang berjalan
         this.isProcessing = false;
         this.pollingInterval = options.pollingInterval || 5000; // 5 detik per unduhan agar tidak diblokir WA
         this.maxRetries = 3;
@@ -41,22 +42,31 @@ class MediaQueueService {
     /**
      * Tambah pekerjaan ke antrian
      */
-    async addToQueue(messageId, customer, messageTimestamp) {
-        // Cek apakah sudah ada di antrian
+    async addToQueue(messageId, customer, messageTimestamp, isPriority = false) {
+        // Cek apakah sudah ada di antrian (termasuk yang sedang diproses)
         if (this.queue.some(job => job.messageId === messageId)) return;
+        if (this.currentJob && this.currentJob.messageId === messageId) return;
 
-        this.queue.push({
+        const newJob = {
             messageId,
             customerId: customer.id,
             customerPhone: customer.phone_number,
             timestamp: messageTimestamp,
             retryCount: 0,
             status: 'PENDING',
+            isPriority,
             addedAt: new Date().toISOString()
-        });
+        };
+
+        if (isPriority) {
+            this.queue.unshift(newJob);
+            console.log(`[MEDIA-QUEUE] 🚀 PRIORITAS: ${customer.phone_number} masuk jalur cepat!`);
+        } else {
+            this.queue.push(newJob);
+        }
 
         this.saveQueue();
-        console.log(`[MEDIA-QUEUE] 📥 Antrian bertambah: ${messageId} (Customer: ${customer.phone_number}). Total: ${this.queue.length}`);
+        console.log(`[MEDIA-QUEUE] 📥 Antrian bertambah: ${messageId.split('_').pop()}... Total: ${this.queue.length}`);
         
         if (!this.isProcessing) {
             this.startProcessing();
@@ -67,42 +77,42 @@ class MediaQueueService {
         if (this.isProcessing || this.queue.length === 0) return;
         this.isProcessing = true;
 
-        console.log(`[MEDIA-QUEUE] 🚀 Memulai pemrosesan antrian media (${this.queue.length} pekerjaan)...`);
+        console.log(`[MEDIA-QUEUE] 🚀 Worker Aktif (${this.queue.length} antrian)...`);
         
         while (this.queue.length > 0) {
-            const job = this.queue[0];
+            // Pindahkan dari antrian ke 'currentJob' agar aman dari race condition saat unshift
+            this.currentJob = this.queue.shift();
+            this.saveQueue();
             
             try {
-                const success = await this.processJob(job);
-                if (success) {
-                    this.queue.shift(); // Hapus yang sukses
-                } else {
-                    // Pindahkan ke belakang antrian untuk dicoba nanti jika masih ada jatah retry
-                    const completedJob = this.queue.shift();
-                    if (completedJob.retryCount < this.maxRetries) {
-                        completedJob.retryCount++;
-                        completedJob.status = 'RETRYING';
-                        this.queue.push(completedJob);
-                        console.log(`[MEDIA-QUEUE] 🔄 Menjadwal ulang retry (${completedJob.retryCount}/${this.maxRetries}) untuk ${completedJob.customerPhone}`);
+                const success = await this.processJob(this.currentJob);
+                if (!success) {
+                    // Jika gagal, cek apakah berhak retry
+                    if (this.currentJob.retryCount < this.maxRetries) {
+                        this.currentJob.retryCount++;
+                        this.currentJob.status = 'RETRYING';
+                        // Masukkan ke belakang antrian normal
+                        this.queue.push(this.currentJob);
+                        console.log(`[MEDIA-QUEUE] 🔄 Retry (${this.currentJob.retryCount}/${this.maxRetries}) untuk ${this.currentJob.customerPhone}`);
                     } else {
-                        console.error(`[MEDIA-QUEUE] ❌ Menyerah pada ${completedJob.customerPhone} setelah ${this.maxRetries} kali percobaan.`);
+                        console.error(`[MEDIA-QUEUE] ❌ Menyerah pada ${this.currentJob.customerPhone} (Gagal total).`);
                     }
                 }
             } catch (e) {
-                console.error('[MEDIA-QUEUE] ❌ Error vatal pada worker:', e.message);
-                this.queue.shift(); // Amankan agar loop tidak macet
+                console.error('[MEDIA-QUEUE] ❌ Error vatal Worker:', e.message);
             }
 
+            this.currentJob = null;
             this.saveQueue();
             
-            // Jeda antar unduhan (Throttling) - CRITICAL untuk Scalability
+            // Jeda antar unduhan (Throttling)
             if (this.queue.length > 0) {
                 await new Promise(r => setTimeout(r, this.pollingInterval));
             }
         }
 
         this.isProcessing = false;
-        console.log(`[MEDIA-QUEUE] 🏁 Antrian kosong. Worker masuk mode standby.`);
+        console.log(`[MEDIA-QUEUE] 🏁 Antrian bersih. Standby.`);
     }
 
     async processJob(job) {

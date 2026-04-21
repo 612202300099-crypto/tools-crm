@@ -149,7 +149,7 @@ async function hydrateContactCache() {
 }
 
 // CORE ENGINE HANDLER (Diekstrak agar bisa dipakai untuk pesan masuk realtime & sinkronisasi tertinggal)
-async function processMessageCommand(message, skipCustomerUpdate = false) {
+async function processMessageCommand(message, skipCustomerUpdate = false, isPriority = false) {
     try {
         const isFromMe = message.fromMe;
         const waMessageId = message.id._serialized;
@@ -352,8 +352,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
             // [POWERFULL] Pindahkan proses download ke Antrian Latar Belakang (Asynchronous)
             // Ini membuat AI Bot membalas INSTAN tanpa tertunda proses download foto.
             if (!isFromMe) {
-                console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang...`);
-                mediaQueue.addToQueue(waMessageId, customer, msgTimestamp);
+                console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang (Prioritas: ${isPriority})...`);
+                mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, isPriority);
             } else {
                 console.log(`[DEBUG] ⏭️ Media dari Bot/Admin dideteksi. Abaikan antrian.`);
             }
@@ -572,7 +572,8 @@ app.post('/api/wa/deep-resync', async (req, res) => {
                         
                         for (const msg of messages) {
                             if (msg.timestamp >= startTs && msg.timestamp <= endTs) {
-                                await processMessageCommand(msg, false);
+                                // Background Resync masal menggunakan Prioritas Normal (false)
+                                await processMessageCommand(msg, false, false);
                                 totalProcessed++;
                                 await new Promise(r => setTimeout(r, 500));
                                 stability.heartbeat();
@@ -653,7 +654,8 @@ app.post('/api/wa/resync', async (req, res) => {
         
         let count = 0;
         for (const msg of historyMessages) {
-            await processMessageCommand(msg, true);
+            // [VVIP] Klik Tombol "Gali Ulang" menggunakan Prioritas Tinggi (true)
+            await processMessageCommand(msg, true, true);
             count++;
         }
         
