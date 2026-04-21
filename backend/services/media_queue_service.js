@@ -141,19 +141,38 @@ class MediaQueueService {
 
             const publicUrl = `${this.PUBLIC_API_URL}/uploads/${fileName}`;
 
-            // 4. Update Database
-            await this.supabase.from('media').insert({
+            // 4. Dapatkan UUID internal dari tabel messages
+            const { data: msgRecord, error: msgFindError } = await this.supabase
+                .from('messages')
+                .select('id')
+                .eq('wa_id', job.messageId)
+                .single();
+
+            if (msgFindError || !msgRecord) {
+                console.error(`[MEDIA-QUEUE] ❌ Pesan ${job.messageId} tidak ditemukan di DB. Tidak bisa menautkan media.`);
+                return true; // Skip karena datanya tidak ada
+            }
+
+            // 5. Simpan ke database media (Gunakan UUID yang ditemukan)
+            const { error: mediaError } = await this.supabase.from('media').insert({
                  customer_id: job.customerId,
-                 message_id: message.id.id || job.messageId.split('_').pop(), // Menyesuaikan ID relasi
+                 message_id: msgRecord.id,
                  file_url: publicUrl,
                  file_name: fileName,
                  created_at: job.timestamp
             });
 
-            // 5. Update Status Customer
-            await this.supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', job.customerId);
+            if (mediaError) {
+                throw new Error(`Gagal simpan ke tabel media: ${mediaError.message}`);
+            }
 
-            console.log(`[MEDIA-QUEUE] ✅ Sukses! Foto tersimpan untuk ${job.customerPhone}`);
+            // 6. Update Status Customer
+            const { error: custError } = await this.supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', job.customerId);
+            if (custError) {
+                console.warn(`[MEDIA-QUEUE] ⚠️ Gagal update status customer: ${custError.message}`);
+            }
+
+            console.log(`[MEDIA-QUEUE] ✅ Sukses! Foto tersimpan & ditautkan untuk ${job.customerPhone}`);
             return true;
         } catch (err) {
             console.error(`[MEDIA-QUEUE] ⚠️ Gagal mengolah media untuk ${job.customerPhone}:`, err.message);
