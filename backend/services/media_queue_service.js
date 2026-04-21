@@ -120,19 +120,37 @@ class MediaQueueService {
             console.log(`[MEDIA-QUEUE] ⏳ Memproses unduhan untuk ${job.customerPhone}...`);
             
             // 1. Dapatkan object pesan asli dari WA
-            const message = await this.client.getMessageById(job.messageId);
+            let message = await this.client.getMessageById(job.messageId);
+            
+            // [DEEP-SEARCH] Jika tidak ketemu, coba paksa muat konteks chat-nya
+            if (!message) {
+                console.log(`[DEEP-SEARCH] 🔍 Pesan ${job.messageId.split('_').pop()} tidak di cache. Memulihkan konteks...`);
+                try {
+                    const chatId = job.messageId.split('_')[1]; // Ekstrak chatId dari serialized ID
+                    const chat = await this.client.getChatById(chatId);
+                    // Pemuatan ulang riwayat chat (ini memicu browser mengisi cache internalnya)
+                    await chat.fetchMessages({ limit: 50 });
+                    // Tunggu sesaat agar sinkronisasi internal browser selesai
+                    await new Promise(r => setTimeout(r, 2000));
+                    // Coba cari lagi
+                    message = await this.client.getMessageById(job.messageId);
+                } catch (deepErr) {
+                    console.warn(`[DEEP-SEARCH] ⚠️ Gagal memulihkan konteks untuk ${job.customerPhone}:`, deepErr.message);
+                }
+            }
+
             if (!message || !message.hasMedia) {
-                console.warn(`[MEDIA-QUEUE] ⚠️ Pesan tidak ditemukan atau tidak memiliki media: ${job.messageId}`);
+                console.warn(`[MEDIA-QUEUE] ⚠️ Pesan tidak ditemukan atau tidak memiliki media setelah Deep-Search: ${job.messageId}`);
                 return true; // Skip saja
             }
 
             // 2. Unduh Media dengan Timeout
             const media = await this.withTimeout(message.downloadMedia(), 55000, 'downloadMedia_Worker');
             if (!media || !media.data) {
-                throw new Error('Data media kosong atau timeout');
+                throw new Error('Data media kosong atau timeout dari server WA');
             }
 
-            // 3. Simpan ke VPS (Sama seperti sebelumnya)
+            // 3. Simpan ke VPS
             const buffer = Buffer.from(media.data, 'base64');
             const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
             let fileExt = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
@@ -159,11 +177,11 @@ class MediaQueueService {
                 .single();
 
             if (msgFindError || !msgRecord) {
-                console.error(`[MEDIA-QUEUE] ❌ Pesan ${job.messageId} tidak ditemukan di DB. Tidak bisa menautkan media.`);
-                return true; // Skip karena datanya tidak ada
+                console.error(`[MEDIA-QUEUE] ❌ Pesan ${job.messageId} tidak ditemukan di DB. Gagal menautkan.`);
+                return true; 
             }
 
-            // 5. Simpan ke database media (Gunakan UUID yang ditemukan)
+            // 5. Simpan ke database media (Tautkan UUID)
             const { error: mediaError } = await this.supabase.from('media').insert({
                  customer_id: job.customerId,
                  message_id: msgRecord.id,
@@ -177,12 +195,9 @@ class MediaQueueService {
             }
 
             // 6. Update Status Customer
-            const { error: custError } = await this.supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', job.customerId);
-            if (custError) {
-                console.warn(`[MEDIA-QUEUE] ⚠️ Gagal update status customer: ${custError.message}`);
-            }
+            await this.supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', job.customerId);
 
-            console.log(`[MEDIA-QUEUE] ✅ Sukses! Foto tersimpan & ditautkan untuk ${job.customerPhone}`);
+            console.log(`[MEDIA-QUEUE] ✅ Sukses VVIP! Foto tersimpan & ditautkan untuk ${job.customerPhone}`);
             return true;
         } catch (err) {
             console.error(`[MEDIA-QUEUE] ⚠️ Gagal mengolah media untuk ${job.customerPhone}:`, err.message);
