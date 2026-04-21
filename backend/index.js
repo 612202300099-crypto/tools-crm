@@ -10,6 +10,7 @@ const path = require('path');
 const cron = require('node-cron');
 const cleanupService = require('./services/cleanup_service');
 const StabilityManager = require('./services/stability_manager');
+const MediaQueueService = require('./services/media_queue_service');
 const { checkAndRespond, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
@@ -74,6 +75,12 @@ const client = new Client({
 // [WATCHDOG] Inisialisasi Penjaga Stabilitas
 const stability = new StabilityManager(client, {
     staleThreshold: 45 * 60 * 1000 // 45 menit tanpa aktifitas = Restart
+});
+
+// [MEDIA-QUEUE] Inisialisasi Antrian Media Asinkron (Best Practice)
+const mediaQueue = new MediaQueueService(client, supabase, {
+    publicUrl: PUBLIC_API_URL,
+    pollingInterval: 5000 // Jeda 5 detik antar download agar aman dari blokir WA
 });
 
 // FUNGSI PENDUKUNG: Resolving LID ke Nomor HP asli secara agresif
@@ -342,53 +349,13 @@ async function processMessageCommand(message, skipCustomerUpdate = false) {
         }
 
         if (message.hasMedia) {
-            // [FIX] Hanya simpan ke galeri dan update status jika media berasal dari CUSTOMER (!isFromMe)
+            // [POWERFULL] Pindahkan proses download ke Antrian Latar Belakang (Asynchronous)
+            // Ini membuat AI Bot membalas INSTAN tanpa tertunda proses download foto.
             if (!isFromMe) {
-                try {
-                    console.log(`📥 Mengunduh media dari customer ${customerPhoneNumber}...`);
-                    // [STABILISASI] Batas waktu download dinaikkan ke 60 detik (Point 5). 
-                    const media = await withTimeout(message.downloadMedia(), 55000, 'downloadMedia');
-                    
-                    if (!media || !media.data) {
-                        console.log(`⚠️ Gambar Kadaluarsa/Gagal didownload dari server WA untuk ${customerPhoneNumber}`);
-                    } else {
-                        const buffer = Buffer.from(media.data, 'base64');
-                        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-                        let fileExt = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
-                        if (fileExt && fileExt.includes(';')) fileExt = fileExt.split(';')[0];
-                        const ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
-                        
-                        const fileName = `${customer.id}/foto-${uniqueSuffix}.${ext}`;
-
-                        const uploadsDir = path.join(__dirname, 'uploads', customer.id.toString());
-                        if (!fs.existsSync(uploadsDir)) {
-                            fs.mkdirSync(uploadsDir, { recursive: true });
-                        }
-                        
-                        const filePath = path.join(__dirname, 'uploads', fileName);
-                        fs.writeFileSync(filePath, buffer);
-
-                        const publicUrl = `${PUBLIC_API_URL}/uploads/${fileName}`;
-
-                        // Simpan ke database media (Gunakan kolom yang benar sesuai skema: customer_id, file_url)
-                        await supabase.from('media').insert({
-                             customer_id: customer.id,
-                             message_id: messageRecord.id,
-                             file_url: publicUrl,
-                             file_name: fileName,
-                             created_at: msgTimestamp
-                        });
-
-                        // Sundul status customer ke 'SUDAH_KIRIM_FOTO'
-                        await supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', customer.id);
-                        console.log(`✅ Media tersimpan & status diperbarui untuk ${customerPhoneNumber}`);
-                    }
-                } catch (mediaErr) {
-                    // [STABILISASI] Jika media gagal, JANGAN hentikan flow utama (AI tetap harus membalas)
-                    console.error(`⚠️ [MEDIA-FAIL] Gagal memproses media untuk ${customerPhoneNumber} (Flow berlanjut):`, mediaErr.message);
-                }
+                console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang...`);
+                mediaQueue.addToQueue(waMessageId, customer, msgTimestamp);
             } else {
-                console.log(`[DEBUG] ⏭️ Media dari Bot/Admin (fromMe) dideteksi. Lewati galeri & status update.`);
+                console.log(`[DEBUG] ⏭️ Media dari Bot/Admin dideteksi. Abaikan antrian.`);
             }
         }
         // ─── AI FOLLOW-UP: Minta nomor pesanan jika belum ada ─────────────────
