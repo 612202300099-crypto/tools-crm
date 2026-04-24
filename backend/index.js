@@ -15,6 +15,29 @@ const { checkAndRespond, sendPostOrderFollowUp, invalidateConfigCache, withTimeo
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+/**
+ * safeDbCall - Wrapper untuk Supabase agar tahan banting terhadap Network Timeout
+ * Melakukan retry hingga 3x jika terjadi kesalahan koneksi.
+ */
+async function safeDbCall(operation, label = 'DB_OP', retries = 3) {
+    for (let i = 0; i < retries; i++) {
+        try {
+            const result = await operation();
+            if (result.error) throw result.error;
+            return result;
+        } catch (err) {
+            const isNetworkError = err.message?.includes('fetch') || err.message?.includes('timeout') || err.code === 'UND_ERR_CONNECT_TIMEOUT';
+            if (isNetworkError && i < retries - 1) {
+                const delay = (i + 1) * 2000;
+                console.warn(`[${label}] ⚠️ Koneksi DB gagal (Percobaan ${i+1}/${retries}). Mencoba lagi dalam ${delay}ms...`);
+                await sleep(delay);
+                continue;
+            }
+            throw err;
+        }
+    }
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -255,22 +278,41 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             return;
         }
 
-        let { data: customer, error: customerError } = await withTimeout(
-            supabase.from('customers').select('*').eq('phone_number', customerPhoneNumber).single(),
-            15000, 'fetchCustomerDB'
-        ).catch(e => ({ data: null, error: e }));
+        let customer = null;
+        try {
+            const { data } = await safeDbCall(
+                () => supabase.from('customers').select('*').eq('phone_number', customerPhoneNumber).single(),
+                'fetchCustomer'
+            );
+            customer = data;
+        } catch (e) {
+            if (e.code !== 'PGRST116') { // PGRST116 is "no rows returned", which is fine
+                console.error(`[DEBUG] ❌ Gagal fetch customer:`, e.message);
+            }
+        }
 
         if (!customer) {
             console.log(`[DEBUG] 🆕 Menciptakan customer baru di DB...`);
-            const { data: newCustomer, error: createError } = await withTimeout(
-                supabase.from('customers').insert({
-                    phone_number: customerPhoneNumber,
-                    name: contactPushname,
-                    status: 'BELUM_KIRIM_FOTO',
-                    created_at: msgTimestamp 
-                }).select().single(),
-                15000, 'createCustomerDB'
-            ).catch(e => ({ data: null, error: e }));
+            try {
+                const { data: newCustomer } = await safeDbCall(
+                    () => supabase.from('customers').insert({
+                        phone_number: customerPhoneNumber,
+                        name: contactPushname,
+                        status: 'BELUM_KIRIM_FOTO',
+                        created_at: msgTimestamp 
+                    }).select().single(),
+                    'createCustomer'
+                );
+                customer = newCustomer;
+            } catch (createError) {
+                console.log(`[DEBUG] ⚠️ Gagal create customer:`, createError.message);
+                if (createError.code === '23505') {
+                    const { data: existing } = await supabase.from('customers').select('*').eq('phone_number', customerPhoneNumber).single();
+                    customer = existing;
+                } else {
+                    throw createError;
+                }
+            }
 
             if (createError) {
                 console.log(`[DEBUG] ⚠️ Gagal create customer:`, createError);
@@ -316,33 +358,31 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         if (isDuplicate) {
             if (!message.hasMedia) return; 
             
-            // HEALING MODE: Cek apakah media sudah benar-benar ada di tabel media?
-            const { data: secureMedia } = await supabase
-                .from('media')
-                .select('id')
-                .eq('message_id', messageRecord.id)
-                .limit(1);
+            // HEALING MODE
+            const { data: secureMedia } = await safeDbCall(
+                () => supabase.from('media').select('id').eq('message_id', messageRecord.id).limit(1),
+                'checkMediaHealing'
+            );
             
             if (secureMedia && secureMedia.length > 0) {
-                 return; // Sudah lengkap, skip.
+                 return; 
             }
             console.log(`🩹 HEALING: Menambal media yang hilang untuk pesan ${waMessageId}`);
         } else {
-            const { data: msgData, error: msgError } = await supabase
-                .from('messages')
-                .insert({
-                    customer_id: customer.id,
-                    wa_id: waMessageId,
-                    message_hash: secureMessageHash, 
-                    body: message.body || (message.hasMedia ? '[Attachment Dokumen/Gambar]' : ''),
-                    is_from_me: isFromMe,
-                    created_at: msgTimestamp
-                })
-                .select()
-                .single();
-            if(!msgError) {
+            try {
+                const { data: msgData } = await safeDbCall(
+                    () => supabase.from('messages').insert({
+                        customer_id: customer.id,
+                        wa_id: waMessageId,
+                        message_hash: secureMessageHash, 
+                        body: message.body || (message.hasMedia ? '[Attachment Dokumen/Gambar]' : ''),
+                        is_from_me: isFromMe,
+                        created_at: msgTimestamp
+                    }).select().single(),
+                    'insertMessage'
+                );
                 messageRecord = msgData;
-            } else {
+            } catch (msgError) {
                 console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message);
             }
         }
