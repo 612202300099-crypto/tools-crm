@@ -5,7 +5,7 @@ const { MessageMedia } = require('whatsapp-web.js');
 /**
  * MediaQueueService
  * Arsitektur Jangka Panjang untuk menangani unduhan media secara asinkron.
- * Fitur: Throttling, Persistence, Retry, dan Non-blocking.
+ * Dioptimasi dengan Worker Pool untuk menangani antrian ribuan secara cepat.
  */
 class MediaQueueService {
     constructor(client, supabase, options = {}) {
@@ -13,11 +13,18 @@ class MediaQueueService {
         this.supabase = supabase;
         this.PUBLIC_API_URL = options.publicUrl || 'https://api-wa.parecustom.com';
         this.queueFile = path.join(__dirname, '../media_queue_state.json');
-        this.queue = this.loadQueue();
-        this.currentJob = null; // Melacak pekerjaan yang sedang berjalan
-        this.isProcessing = false;
-        this.pollingInterval = options.pollingInterval || 5000; // 5 detik per unduhan agar tidak diblokir WA
+        
+        // Konfigurasi Performa
+        this.concurrency = options.concurrency || 10; // Default 10 worker simultan
+        this.pollingInterval = options.pollingInterval || 1000; // Jeda antar cek (lebih cepat)
         this.maxRetries = 3;
+        this.dbTimeout = 15000; // Timeout DB 15 detik
+        
+        this.queue = this.loadQueue();
+        this.activeWorkers = 0;
+        this.isProcessing = false;
+        
+        console.log(`[MEDIA-QUEUE] 🛠️ Inisialisasi dengan ${this.concurrency} worker.`);
     }
 
     loadQueue() {
@@ -33,6 +40,7 @@ class MediaQueueService {
 
     saveQueue() {
         try {
+            // Kita simpan berkala agar tidak berat di I/O
             fs.writeFileSync(this.queueFile, JSON.stringify(this.queue, null, 2));
         } catch (e) {
             console.error('[MEDIA-QUEUE] ❌ Gagal menyimpan state antrian:', e.message);
@@ -43,9 +51,7 @@ class MediaQueueService {
      * Tambah pekerjaan ke antrian
      */
     async addToQueue(messageId, customer, messageTimestamp, isPriority = false) {
-        // Cek apakah sudah ada di antrian (termasuk yang sedang diproses)
         if (this.queue.some(job => job.messageId === messageId)) return;
-        if (this.currentJob && this.currentJob.messageId === messageId) return;
 
         const newJob = {
             messageId,
@@ -66,148 +72,156 @@ class MediaQueueService {
         }
 
         this.saveQueue();
-        console.log(`[MEDIA-QUEUE] 📥 Antrian bertambah: ${messageId.split('_').pop()}... Total: ${this.queue.length}`);
+        console.log(`[MEDIA-QUEUE] 📥 Antrian: ${this.queue.length} | Baru: ${messageId.split('_').pop()}`);
         
-        if (!this.isProcessing) {
-            this.startProcessing();
-        }
+        this.startProcessing();
     }
 
+    /**
+     * Memulai Worker Pool
+     */
     async startProcessing() {
         if (this.isProcessing || this.queue.length === 0) return;
         this.isProcessing = true;
 
-        console.log(`[MEDIA-QUEUE] 🚀 Worker Aktif (${this.queue.length} antrian)...`);
+        console.log(`[MEDIA-QUEUE] 🔥 Mengaktifkan Worker Pool (Target: ${this.concurrency} concurrent)...`);
         
+        const spawnWorkers = async () => {
+            while (this.activeWorkers < this.concurrency && this.queue.length > 0) {
+                this.activeWorkers++;
+                this.runWorker(this.activeWorkers).finally(() => {
+                    this.activeWorkers--;
+                    // Jika masih ada antrian, panggil lagi
+                    if (this.queue.length > 0) {
+                        spawnWorkers();
+                    } else if (this.activeWorkers === 0) {
+                        this.isProcessing = false;
+                        console.log(`[MEDIA-QUEUE] 🏁 Semua worker selesai. Antrian bersih.`);
+                    }
+                });
+            }
+        };
+
+        spawnWorkers();
+    }
+
+    /**
+     * Individual Worker Loop
+     */
+    async runWorker(workerId) {
         while (this.queue.length > 0) {
-            // Pindahkan dari antrian ke 'currentJob' agar aman dari race condition saat unshift
-            this.currentJob = this.queue.shift();
+            const job = this.queue.shift();
+            if (!job) break;
+
             this.saveQueue();
             
             try {
-                const success = await this.processJob(this.currentJob);
+                const success = await this.processJob(job, workerId);
                 if (!success) {
-                    // Jika gagal, cek apakah berhak retry
-                    if (this.currentJob.retryCount < this.maxRetries) {
-                        this.currentJob.retryCount++;
-                        this.currentJob.status = 'RETRYING';
-                        // Masukkan ke belakang antrian normal
-                        this.queue.push(this.currentJob);
-                        console.log(`[MEDIA-QUEUE] 🔄 Retry (${this.currentJob.retryCount}/${this.maxRetries}) untuk ${this.currentJob.customerPhone}`);
+                    if (job.retryCount < this.maxRetries) {
+                        job.retryCount++;
+                        job.status = 'RETRYING';
+                        this.queue.push(job);
+                        console.log(`[W-${workerId}] 🔄 Retry (${job.retryCount}/${this.maxRetries}) -> ${job.customerPhone}`);
                     } else {
-                        console.error(`[MEDIA-QUEUE] ❌ Menyerah pada ${this.currentJob.customerPhone} (Gagal total).`);
+                        console.error(`[W-${workerId}] ❌ Menyerah pada ${job.customerPhone}`);
                     }
                 }
             } catch (e) {
-                console.error('[MEDIA-QUEUE] ❌ Error vatal Worker:', e.message);
+                console.error(`[W-${workerId}] ❌ Error Fatal:`, e.message);
             }
 
-            this.currentJob = null;
-            this.saveQueue();
-            
-            // Jeda antar unduhan (Throttling)
-            if (this.queue.length > 0) {
+            // Jeda dinamis: Jika prioritas, jangan kasih jeda. Jika normal, kasih jeda pendek.
+            if (this.queue.length > 0 && !job.isPriority) {
                 await new Promise(r => setTimeout(r, this.pollingInterval));
             }
         }
-
-        this.isProcessing = false;
-        console.log(`[MEDIA-QUEUE] 🏁 Antrian bersih. Standby.`);
     }
 
-    async processJob(job) {
+    async processJob(job, workerId = 0) {
         try {
-            console.log(`[MEDIA-QUEUE] ⏳ Memproses unduhan untuk ${job.customerPhone}...`);
+            console.log(`[W-${workerId}] ⏳ Processing ${job.customerPhone}...`);
             
             // 1. Dapatkan object pesan asli dari WA
             let message = await this.client.getMessageById(job.messageId);
             
-            // [DEEP-SEARCH] Jika tidak ketemu, coba paksa muat konteks chat-nya
+            // Deep search jika cache hilang
             if (!message) {
-                console.log(`[DEEP-SEARCH] 🔍 Pesan ${job.messageId.split('_').pop()} tidak di cache. Memulihkan konteks...`);
                 try {
-                    const chatId = job.messageId.split('_')[1]; // Ekstrak chatId dari serialized ID
+                    const chatId = job.messageId.split('_')[1];
                     const chat = await this.client.getChatById(chatId);
-                    // Pemuatan ulang riwayat chat (ini memicu browser mengisi cache internalnya)
-                    await chat.fetchMessages({ limit: 50 });
-                    // Tunggu sesaat agar sinkronisasi internal browser selesai
-                    await new Promise(r => setTimeout(r, 2000));
-                    // Coba cari lagi
+                    await chat.fetchMessages({ limit: 20 });
                     message = await this.client.getMessageById(job.messageId);
-                } catch (deepErr) {
-                    console.warn(`[DEEP-SEARCH] ⚠️ Gagal memulihkan konteks untuk ${job.customerPhone}:`, deepErr.message);
-                }
+                } catch (e) { /* silent */ }
             }
 
             if (!message || !message.hasMedia) {
-                console.warn(`[MEDIA-QUEUE] ⚠️ Pesan tidak ditemukan atau tidak memiliki media setelah Deep-Search: ${job.messageId}`);
-                return true; // Skip saja
+                console.warn(`[W-${workerId}] ⚠️ Skip: Pesan/Media tidak ditemukan.`);
+                return true; 
             }
 
-            // 2. Unduh Media dengan Timeout
-            const media = await this.withTimeout(message.downloadMedia(), 55000, 'downloadMedia_Worker');
-            if (!media || !media.data) {
-                throw new Error('Data media kosong atau timeout dari server WA');
-            }
+            // 2. Unduh Media (Timeout 45s agar tidak gantung)
+            const media = await this.withTimeout(message.downloadMedia(), 45000, 'downloadMedia');
+            if (!media || !media.data) throw new Error('Data media kosong');
 
             // 3. Simpan ke VPS
             const buffer = Buffer.from(media.data, 'base64');
-            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-            let fileExt = media.mimetype ? media.mimetype.split('/')[1] : 'jpg';
-            if (fileExt && fileExt.includes(';')) fileExt = fileExt.split(';')[0];
+            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E6);
+            let fileExt = (media.mimetype || 'image/jpeg').split('/')[1].split(';')[0];
             const ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
             
             const fileName = `${job.customerId}/foto-${uniqueSuffix}.${ext}`;
             const uploadsDir = path.join(__dirname, '../uploads', job.customerId.toString());
             
-            if (!fs.existsSync(uploadsDir)) {
-                fs.mkdirSync(uploadsDir, { recursive: true });
-            }
+            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
             
             const filePath = path.join(__dirname, '../uploads', fileName);
             fs.writeFileSync(filePath, buffer);
 
             const publicUrl = `${this.PUBLIC_API_URL}/uploads/${fileName}`;
 
-            // 4. Dapatkan UUID internal dari tabel messages
-            const { data: msgRecord, error: msgFindError } = await this.supabase
-                .from('messages')
-                .select('id')
-                .eq('wa_id', job.messageId)
-                .single();
+            // 4. Cari Message di DB (Timeout Guard)
+            const { data: msgRecord, error: msgFindError } = await this.withTimeout(
+                this.supabase.from('messages').select('id').eq('wa_id', job.messageId).single(),
+                this.dbTimeout, 'findMessageDB'
+            );
 
             if (msgFindError || !msgRecord) {
-                console.error(`[MEDIA-QUEUE] ❌ Pesan ${job.messageId} tidak ditemukan di DB. Gagal menautkan.`);
+                console.error(`[W-${workerId}] ❌ Message ID ${job.messageId} tidak ada di DB.`);
                 return true; 
             }
 
-            // 5. Simpan ke database media (Tautkan UUID)
-            const { error: mediaError } = await this.supabase.from('media').insert({
-                 customer_id: job.customerId,
-                 message_id: msgRecord.id,
-                 file_url: publicUrl,
-                 file_name: fileName,
-                 created_at: job.timestamp
-            });
+            // 5. Simpan ke media (Timeout Guard)
+            const { error: mediaError } = await this.withTimeout(
+                this.supabase.from('media').insert({
+                    customer_id: job.customerId,
+                    message_id: msgRecord.id,
+                    file_url: publicUrl,
+                    file_name: fileName,
+                    created_at: job.timestamp
+                }),
+                this.dbTimeout, 'insertMediaDB'
+            );
 
-            if (mediaError) {
-                throw new Error(`Gagal simpan ke tabel media: ${mediaError.message}`);
-            }
+            if (mediaError) throw new Error(`DB Insert Error: ${mediaError.message}`);
 
             // 6. Update Status Customer
-            await this.supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', job.customerId);
+            await this.withTimeout(
+                this.supabase.from('customers').update({ status: 'SUDAH_KIRIM_FOTO' }).eq('id', job.customerId),
+                this.dbTimeout, 'updateCustomerDB'
+            );
 
-            console.log(`[MEDIA-QUEUE] ✅ Sukses VVIP! Foto tersimpan & ditautkan untuk ${job.customerPhone}`);
+            console.log(`[W-${workerId}] ✅ Sukses! ${job.customerPhone}`);
             return true;
         } catch (err) {
-            console.error(`[MEDIA-QUEUE] ⚠️ Gagal mengolah media untuk ${job.customerPhone}:`, err.message);
+            console.error(`[W-${workerId}] ⚠️ Gagal:`, err.message);
             return false;
         }
     }
 
     withTimeout(promise, ms, label) {
         let timeout = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`[TIMEOUT] ${label} melebihi ${ms / 1000}s`)), ms)
+            setTimeout(() => reject(new Error(`[TIMEOUT] ${label} (${ms/1000}s)`)), ms)
         );
         return Promise.race([promise, timeout]);
     }

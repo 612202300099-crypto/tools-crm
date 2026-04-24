@@ -77,10 +77,11 @@ const stability = new StabilityManager(client, {
     staleThreshold: 45 * 60 * 1000 // 45 menit tanpa aktifitas = Restart
 });
 
-// [MEDIA-QUEUE] Inisialisasi Antrian Media Asinkron (Best Practice)
+// [MEDIA-QUEUE] Inisialisasi Antrian Media Asinkron (High-Performance Worker Pool)
 const mediaQueue = new MediaQueueService(client, supabase, {
     publicUrl: PUBLIC_API_URL,
-    pollingInterval: 5000 // Jeda 5 detik antar download agar aman dari blokir WA
+    concurrency: 15, // 15 Worker simultan untuk memangkas antrian ribuan
+    pollingInterval: 1000 // Jeda 1 detik antar cek
 });
 
 // FUNGSI PENDUKUNG: Resolving LID ke Nomor HP asli secara agresif
@@ -254,24 +255,22 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             return;
         }
 
-        let { data: customer, error: customerError } = await supabase
-            .from('customers')
-            .select('*')
-            .eq('phone_number', customerPhoneNumber)
-            .single();
+        let { data: customer, error: customerError } = await withTimeout(
+            supabase.from('customers').select('*').eq('phone_number', customerPhoneNumber).single(),
+            15000, 'fetchCustomerDB'
+        ).catch(e => ({ data: null, error: e }));
 
         if (!customer) {
             console.log(`[DEBUG] 🆕 Menciptakan customer baru di DB...`);
-            const { data: newCustomer, error: createError } = await supabase
-                .from('customers')
-                .insert({
+            const { data: newCustomer, error: createError } = await withTimeout(
+                supabase.from('customers').insert({
                     phone_number: customerPhoneNumber,
                     name: contactPushname,
                     status: 'BELUM_KIRIM_FOTO',
-                    created_at: msgTimestamp // Gunakan waktu pesan asli
-                })
-                .select()
-                .single();
+                    created_at: msgTimestamp 
+                }).select().single(),
+                15000, 'createCustomerDB'
+            ).catch(e => ({ data: null, error: e }));
 
             if (createError) {
                 console.log(`[DEBUG] ⚠️ Gagal create customer:`, createError);
