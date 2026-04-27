@@ -125,19 +125,35 @@ function DashboardInboxContent() {
 
     if (customersData && customersData.length > 0) {
         // Step 2: Ambil jumlah media secara manual per ID untuk menghindari Join Timeout
-        // Chunking jika data banyak (untuk amannya kita batch per 200 ID jika melebihi limit URL)
+        // BEST PRACTICE & SAFETY: Chunking array ID untuk menghindari 
+        // HTTP 414 URI Too Long error jika menarik 1000 UUID sekaligus.
         const customerIds = customersData.map(c => c.id);
-        const { data: mediaData } = await supabase
-            .from('media')
-            .select('customer_id')
-            .in('customer_id', customerIds);
-            
-        // Hitung manual
+        const CHUNK_SIZE = 150; 
         const mediaCounts: Record<string, number> = {};
-        if (mediaData) {
-            mediaData.forEach(m => {
-                mediaCounts[m.customer_id] = (mediaCounts[m.customer_id] || 0) + 1;
+        
+        try {
+            // Lakukan request paralel yang di-batch (Efisien & Cepat)
+            const chunkPromises = [];
+            for (let i = 0; i < customerIds.length; i += CHUNK_SIZE) {
+                const chunk = customerIds.slice(i, i + CHUNK_SIZE);
+                chunkPromises.push(
+                    supabase.from('media').select('customer_id').in('customer_id', chunk)
+                );
+            }
+            
+            const chunkResults = await Promise.all(chunkPromises);
+            
+            // Agregasi hasil dari semua chunk
+            chunkResults.forEach(res => {
+                if (res.data) {
+                    res.data.forEach(m => {
+                        mediaCounts[m.customer_id] = (mediaCounts[m.customer_id] || 0) + 1;
+                    });
+                }
             });
+        } catch (err) {
+            console.error("Error menghitung foto (non-fatal):", err);
+            // Aplikasi tetap jalan meski gagal hitung foto (Fail-safe)
         }
 
         // Gabungkan
