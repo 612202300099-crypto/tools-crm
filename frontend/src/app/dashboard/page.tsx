@@ -125,38 +125,41 @@ function DashboardInboxContent() {
 
     if (customersData && customersData.length > 0) {
         // Step 2: Ambil jumlah media secara manual per ID untuk menghindari Join Timeout
-        // BEST PRACTICE & SAFETY: Chunking array ID untuk menghindari 
-        // HTTP 414 URI Too Long error jika menarik 1000 UUID sekaligus.
-        const customerIds = customersData.map(c => c.id);
-        const CHUNK_SIZE = 150; 
+        // BEST PRACTICE & SAFETY: Filter hanya pelanggan yang sudah kirim foto
+        // dan kecilkan CHUNK_SIZE untuk menghindari limit 1000-baris dari Supabase API
+        // yang menyebabkan data foto terpotong (menghasilkan angka 0).
+        const customersNeedCount = customersData.filter(c => c.status !== 'BELUM_KIRIM_FOTO');
+        const customerIds = customersNeedCount.map(c => c.id);
+        const CHUNK_SIZE = 15; // Aman, 15 pelanggan rata-rata total fotonya < 1000
         const mediaCounts: Record<string, number> = {};
         
         try {
-            // Lakukan request paralel yang di-batch (Efisien & Cepat)
-            const chunkPromises = [];
-            for (let i = 0; i < customerIds.length; i += CHUNK_SIZE) {
-                const chunk = customerIds.slice(i, i + CHUNK_SIZE);
-                chunkPromises.push(
-                    supabase.from('media').select('customer_id').in('customer_id', chunk)
-                );
-            }
-            
-            const chunkResults = await Promise.all(chunkPromises);
-            
-            // Agregasi hasil dari semua chunk
-            chunkResults.forEach(res => {
-                if (res.data) {
-                    res.data.forEach(m => {
-                        mediaCounts[m.customer_id] = (mediaCounts[m.customer_id] || 0) + 1;
-                    });
+            if (customerIds.length > 0) {
+                // Lakukan request paralel yang di-batch
+                const chunkPromises = [];
+                for (let i = 0; i < customerIds.length; i += CHUNK_SIZE) {
+                    const chunk = customerIds.slice(i, i + CHUNK_SIZE);
+                    chunkPromises.push(
+                        supabase.from('media').select('customer_id').in('customer_id', chunk)
+                    );
                 }
-            });
+                
+                const chunkResults = await Promise.all(chunkPromises);
+                
+                // Agregasi hasil dari semua chunk
+                chunkResults.forEach(res => {
+                    if (res.data) {
+                        res.data.forEach(m => {
+                            mediaCounts[m.customer_id] = (mediaCounts[m.customer_id] || 0) + 1;
+                        });
+                    }
+                });
+            }
         } catch (err) {
             console.error("Error menghitung foto (non-fatal):", err);
-            // Aplikasi tetap jalan meski gagal hitung foto (Fail-safe)
         }
 
-        // Gabungkan
+        // Gabungkan kembali ke seluruh data (yang belum kirim otomatis 0)
         const enrichedCustomers = customersData.map(c => ({
             ...c,
             media: [{ count: mediaCounts[c.id] || 0 }]
