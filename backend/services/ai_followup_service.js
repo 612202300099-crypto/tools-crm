@@ -118,7 +118,7 @@ async function getAIReply(conversationHistory, systemPrompt) {
  * @param {import('whatsapp-web.js').Client} waClient
  * @param {string} phoneNumber - Nomor HP customer (tanpa @c.us)
  * @param {string} orderId - Nomor pesanan yang ditemukan
- * @param {import('@supabase/supabase-js').SupabaseClient} supabase
+ * @param {import('../supabase_shim').SupabaseClient} supabase
  */
 async function sendPostOrderFollowUp(waClient, phoneNumber, orderId, supabase) {
     try {

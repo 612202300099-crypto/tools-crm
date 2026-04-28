@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, Suspense } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
+import apiClient, { initSocket, API_BASE_URL } from "@/lib/apiClient";
 import Link from "next/link";
 import { format, startOfDay, endOfDay, subDays, startOfMonth, endOfMonth } from "date-fns";
 import { Search, Filter, Calendar, Trash2, Image as ImageIcon, CheckCircle, XCircle } from "lucide-react";
@@ -74,19 +74,10 @@ function DashboardInboxContent() {
   // Poin 1 & 7: Manual Fetch diatur secara spesifik. Akan panggil spinner saat initial load dan filter diganti.
   const fetchCustomers = useCallback(async () => {
     setLoading(true);
-    
-    // Poin 6: Optimasi Server (Tingkatkan Skalabilitas Performa)
-    // PENGGANTIAN STRATEGI: Menggunakan 2-step query karena Supabase free tier timeout (Error 500)
-    // saat melakukan join table media(count) dengan jumlah data >60rb baris.
-    let query = supabase
-      .from("customers")
-      .select("id, phone_number, name, order_id, status, is_valid, created_at")
-      .order("created_at", { ascending: false })
-      .limit(1000); // Failsafe memory
 
     let rangeStart: Date | null = null;
     let rangeEnd: Date | null = null;
-    const now = new Date(); // Local WIB time if browser is set to WIB
+    const now = new Date();
 
     if (dateFilter === "TODAY") {
         rangeStart = startOfDay(now);
@@ -109,69 +100,22 @@ function DashboardInboxContent() {
     // Simpan acuan tanggal untuk filter payload Realtime
     setActiveDateRange({ start: rangeStart, end: rangeEnd });
 
-    if (rangeStart && rangeEnd) {
-        // toISOString automatically converts the local boundary to UTC format which Supabase reads correctly
-        query = query.gte("created_at", rangeStart.toISOString())
-                     .lte("created_at", rangeEnd.toISOString());
-    }
-
-    const { data: customersData, error } = await query;
-    
-    if (error) {
-        console.error("Gagal menarik data customer:", error);
-        setLoading(false);
-        return;
-    }
-
-    if (customersData && customersData.length > 0) {
-        // Step 2: Ambil jumlah media secara manual per ID untuk menghindari Join Timeout
-        // BEST PRACTICE & SAFETY: Filter hanya pelanggan yang sudah kirim foto
-        // dan kecilkan CHUNK_SIZE untuk menghindari limit 1000-baris dari Supabase API
-        // yang menyebabkan data foto terpotong (menghasilkan angka 0).
-        const customersNeedCount = customersData.filter(c => c.status !== 'BELUM_KIRIM_FOTO');
-        const customerIds = customersNeedCount.map(c => c.id);
-        const CHUNK_SIZE = 15; // Aman, 15 pelanggan rata-rata total fotonya < 1000
-        const mediaCounts: Record<string, number> = {};
-        
-        try {
-            if (customerIds.length > 0) {
-                // Lakukan request paralel yang di-batch
-                const chunkPromises = [];
-                for (let i = 0; i < customerIds.length; i += CHUNK_SIZE) {
-                    const chunk = customerIds.slice(i, i + CHUNK_SIZE);
-                    chunkPromises.push(
-                        supabase.from('media').select('customer_id').in('customer_id', chunk)
-                    );
-                }
-                
-                const chunkResults = await Promise.all(chunkPromises);
-                
-                // Agregasi hasil dari semua chunk
-                chunkResults.forEach(res => {
-                    if (res.data) {
-                        res.data.forEach(m => {
-                            mediaCounts[m.customer_id] = (mediaCounts[m.customer_id] || 0) + 1;
-                        });
-                    }
-                });
+    try {
+        const res = await apiClient.get('/customers', {
+            params: {
+                search: searchQuery,
+                status: filterStatus,
+                order: filterOrder,
+                start: rangeStart?.toISOString(),
+                end: rangeEnd?.toISOString()
             }
-        } catch (err) {
-            console.error("Error menghitung foto (non-fatal):", err);
-        }
-
-        // Gabungkan kembali ke seluruh data (yang belum kirim otomatis 0)
-        const enrichedCustomers = customersData.map(c => ({
-            ...c,
-            media: [{ count: mediaCounts[c.id] || 0 }]
-        }));
-        
-        setCustomers(enrichedCustomers);
-    } else {
-        setCustomers([]);
+        });
+        setCustomers(res.data);
+    } catch (err) {
+        console.error("Gagal menarik data:", err);
     }
-    
     setLoading(false);
-  }, [dateFilter, customStart, customEnd]);
+  }, [dateFilter, customStart, customEnd, searchQuery, filterStatus, filterOrder]);
 
   // Poin 4.A: useEffect 1 - Hanya ter-trigger spesifik saat referensi fetchCustomers berubah (Filter diubah user).
   useEffect(() => {
@@ -180,19 +124,20 @@ function DashboardInboxContent() {
 
   // Poin 4.B & Poin 2: useEffect 2 - Subscribe tunggal, TANPA TRIGGER LOAD, Inject local mutation.
   useEffect(() => {
-    const channel = supabase
-      .channel('customers_realtime_db')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'customers' },
-        (payload) => {
-          setCustomers(prev => {
+    const socket = initSocket();
+    
+    const handleDbChange = (payload: any) => {
+        if (payload.table !== 'customers') return;
+
+        setCustomers(prev => {
              // Operasi efisien, React akan mem-batch re-renders saat payload membludak (Poin 3 implicitly di-handle UI tree)
              if (payload.eventType === 'DELETE') {
                  return prev.filter(c => c.id !== payload.old.id);
              }
 
              const newCust = payload.new as Customer;
+             // Ensure boolean parsing
+             newCust.is_valid = Boolean(newCust.is_valid);
              const exists = prev.some(c => c.id === newCust.id);
              
              if (exists) {
@@ -205,15 +150,16 @@ function DashboardInboxContent() {
                  });
              } else {
                  // Prepend (Insert) di posisi ter-atas
+                 if (!newCust.media) newCust.media = [{ count: 0 }];
                  return [newCust, ...prev];
              }
-          });
-        }
-      )
-      .subscribe();
+        });
+    };
+
+    socket.on('db_change', handleDbChange);
 
     return () => {
-      supabase.removeChannel(channel);
+      socket.off('db_change', handleDbChange);
     };
   }, []); // Array Dependensi Kosong: Mengunci re-subscribe! Tidak peduli filter berubah berapapun!
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
+import apiClient from '@/lib/apiClient';
 import { useRouter } from 'next/navigation';
 import { Camera } from 'lucide-react';
 
@@ -17,15 +17,14 @@ export default function Login() {
     setLoading(true);
     setError('');
 
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password,
-    });
-
-    if (error) {
-      setError(error.message);
-    } else {
-      router.push('/dashboard');
+    try {
+      const response = await apiClient.post('/login', { email, password });
+      if (response.data.access_token) {
+        localStorage.setItem('access_token', response.data.access_token);
+        router.push('/dashboard');
+      }
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Invalid email or password');
     }
     setLoading(false);
   };

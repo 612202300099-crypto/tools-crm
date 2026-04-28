@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { supabase } from "@/lib/supabaseClient";
+import apiClient, { initSocket } from "@/lib/apiClient";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { ArrowLeft, Download, CheckCircle, Image as ImageIcon, MessageSquare, Send, ScanSearch, Trash2 } from "lucide-react";
@@ -56,34 +56,46 @@ export default function ChatDetail() {
   useEffect(() => {
     fetchData();
 
-    const channel = supabase
-      .channel(`chat_${customerId}`)
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'messages', filter: `customer_id=eq.${customerId}` }, payload => {
-         if (payload.eventType === 'INSERT') {
-             setMessages(prev => [...prev, payload.new as Message]);
-         } else if (payload.eventType === 'UPDATE') {
-             const updated = payload.new as Message;
-             setMessages(prev => prev.map(m => m.id === updated.id ? updated : m));
-         } else if (payload.eventType === 'DELETE') {
-             setMessages(prev => prev.filter(m => m.id !== payload.old.id));
-         }
-      })
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'media', filter: `customer_id=eq.${customerId}` }, payload => {
-         if (payload.eventType === 'INSERT') {
-             setMediaList(prev => [payload.new as Media, ...prev]);
-         } else if (payload.eventType === 'DELETE') {
-             setMediaList(prev => prev.filter(m => m.id !== payload.old.id));
-         }
-      })
-      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'customers', filter: `id=eq.${customerId}` }, payload => {
-         const updated = payload.new;
-         setCustomer((prev: any) => ({ ...prev, ...updated }));
-         if (updated.order_id) setOrderIdInput(updated.order_id);
-      })
-      .subscribe();
+    const socket = initSocket();
+
+    const handleDbChange = (payload: any) => {
+        if (payload.table === 'messages') {
+            const data = payload.new || payload.old;
+            if (data?.customer_id === customerId) {
+                if (payload.eventType === 'INSERT') {
+                    setMessages(prev => [...prev, payload.new as Message]);
+                } else if (payload.eventType === 'UPDATE') {
+                    const updated = payload.new as Message;
+                    setMessages(prev => prev.map(m => m.id === updated.id ? updated : m));
+                } else if (payload.eventType === 'DELETE') {
+                    setMessages(prev => prev.filter(m => m.id !== payload.old.id));
+                }
+            }
+        } else if (payload.table === 'media') {
+            const data = payload.new || payload.old;
+            if (data?.customer_id === customerId) {
+                if (payload.eventType === 'INSERT') {
+                    setMediaList(prev => [payload.new as Media, ...prev]);
+                } else if (payload.eventType === 'DELETE') {
+                    setMediaList(prev => prev.filter(m => m.id !== payload.old.id));
+                }
+            }
+        } else if (payload.table === 'customers') {
+            const data = payload.new || payload.old;
+            if (data?.id === customerId) {
+                if (payload.eventType === 'UPDATE') {
+                    const updated = payload.new;
+                    setCustomer((prev: any) => ({ ...prev, ...updated }));
+                    if (updated.order_id) setOrderIdInput(updated.order_id);
+                }
+            }
+        }
+    };
+
+    socket.on('db_change', handleDbChange);
 
     return () => {
-      supabase.removeChannel(channel);
+        socket.off('db_change', handleDbChange);
     };
   }, [customerId]);
 
@@ -102,30 +114,34 @@ export default function ChatDetail() {
   }, [scanResult]);
 
   const fetchData = async () => {
-    const { data: cData } = await supabase.from('customers').select('*').eq('id', customerId).single();
-    if (cData) {
-      setCustomer(cData);
-      setNameInput(cData.name || "");
-      setOrderIdInput(cData.order_id || "");
+    try {
+        const cData = await apiClient.get(`/customers/${customerId}`);
+        if (cData.data) {
+            setCustomer(cData.data);
+            setNameInput(cData.data.name || "");
+            setOrderIdInput(cData.data.order_id || "");
+        }
+
+        const mData = await apiClient.get(`/customers/${customerId}/messages`);
+        if (mData.data) setMessages(mData.data);
+
+        const mediaData = await apiClient.get(`/customers/${customerId}/media`);
+        if (mediaData.data) setMediaList(mediaData.data);
+    } catch (err) {
+        console.error("Gagal menarik data detail:", err);
     }
-
-    const { data: mData } = await supabase.from('messages').select('*').eq('customer_id', customerId).order('created_at', { ascending: true });
-    if (mData) setMessages(mData);
-
-    const { data: mediaData } = await supabase.from('media').select('*').eq('customer_id', customerId).order('created_at', { ascending: false });
-    if (mediaData) setMediaList(mediaData);
   };
 
   const handleUpdateCustomer = async () => {
     const changes = { name: nameInput, order_id: orderIdInput };
-    await supabase.from('customers').update(changes).eq('id', customerId);
+    await apiClient.put(`/customers/${customerId}`, changes);
     setCustomer({ ...customer, ...changes });
     alert("Data Profil Pelanggan berhasil disimpan!");
   };
 
   const handleValidate = async () => {
     const changes = { status: 'VALIDATED', is_valid: true };
-    await supabase.from('customers').update(changes).eq('id', customerId);
+    await apiClient.put(`/customers/${customerId}`, changes);
     setCustomer({ ...customer, ...changes });
     alert("Proses Selesai: Customer ditandai VALID.");
   };

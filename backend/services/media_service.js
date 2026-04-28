@@ -81,7 +81,7 @@ PROSEDUR WAJIB:
  * Hapus massal file media dari VPS dan database.
  * 
  * @param {Array<{id: string, file_name: string}>} mediaItems - Daftar media yang akan dihapus
- * @param {import('@supabase/supabase-js').SupabaseClient} supabase
+ * @param {import('../supabase_shim').SupabaseClient} supabase
  * @returns {Promise<{deleted: number, failed: number}>}
  */
 async function deleteMediaBulk(mediaItems, supabase) {

@@ -4,7 +4,9 @@ const cors = require('cors');
 const multer = require('multer');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
-const { createClient } = require('@supabase/supabase-js');
+const { createClient, setIo } = require('./supabase_shim');
+const http = require('http');
+const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
@@ -12,6 +14,8 @@ const cleanupService = require('./services/cleanup_service');
 const StabilityManager = require('./services/stability_manager');
 const MediaQueueService = require('./services/media_queue_service');
 const { checkAndRespond, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
+
+const { router: localApiRouter } = require('./api');
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -41,6 +45,7 @@ async function safeDbCall(operation, label = 'DB_OP', retries = 3) {
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use('/api/local', localApiRouter);
 
 // Setup URL Publik untuk menayangkan Foto dari VPS
 const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com';
@@ -931,8 +936,16 @@ app.post('/api/ai/config/image', uploadAiImage.single('image'), async (req, res)
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Backend WA Engine running on port ${PORT}`);
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: '*' } });
+setIo(io);
+
+io.on('connection', (socket) => {
+    console.log('[SOCKET] Frontend Client connected');
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Backend WA Engine & API running on port ${PORT}`);
     
     // THE JANITOR: Menjalankan skrip bersih-bersih tepat setiap Pukul 02:00 Pagi.
     cron.schedule('0 2 * * *', () => {

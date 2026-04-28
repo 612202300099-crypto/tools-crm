@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { createClient } = require('@supabase/supabase-js');
+const { createClient } = require('../supabase_shim');
 const fs = require('fs');
 const path = require('path');
 
