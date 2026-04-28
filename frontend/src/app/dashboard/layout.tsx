@@ -2,7 +2,6 @@
 
 import Sidebar from '@/components/Sidebar';
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabaseClient';
 import { useRouter } from 'next/navigation';
 
 export default function DashboardLayout({
@@ -14,17 +13,13 @@ export default function DashboardLayout({
   const router = useRouter();
 
   useEffect(() => {
-    checkUser();
-  }, []);
-
-  const checkUser = async () => {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
+    const token = localStorage.getItem('access_token');
+    if (!token) {
       router.push('/login');
     } else {
       setLoading(false);
     }
-  };
+  }, []);
 
   if (loading) return <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-500">Checking auth state...</div>;
 

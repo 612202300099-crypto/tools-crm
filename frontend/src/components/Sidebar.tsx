@@ -2,15 +2,16 @@
 
 import Link from 'next/link';
 import { MessageSquare, Settings, LogOut, Bot } from 'lucide-react';
-import { supabase } from '@/lib/supabaseClient';
 import { useRouter, usePathname } from 'next/navigation';
+import { disconnectSocket } from '@/lib/apiClient';
 
 export default function Sidebar() {
   const router = useRouter();
   const pathname = usePathname();
 
-  const handleLogout = async () => {
-    await supabase.auth.signOut();
+  const handleLogout = () => {
+    localStorage.removeItem('access_token');
+    disconnectSocket();
     router.push('/login');
   };
 
@@ -55,4 +56,3 @@ export default function Sidebar() {
     </div>
   );
 }
-

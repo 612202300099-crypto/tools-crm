@@ -1,26 +1,82 @@
+/**
+ * Supabase Shim — Drop-in replacement for @supabase/supabase-js
+ * Routes all .from() queries to local SQLite via better-sqlite3.
+ * Emits Socket.io events for realtime dashboard updates.
+ * 
+ * Supports: select, insert, update, delete, eq, not, in, gte, lte,
+ *           order, limit, single, and chained .select().single() after insert/update.
+ */
+
 const db = require('./db');
 const crypto = require('crypto');
+
+/**
+ * Sanitize a JS value for SQLite binding.
+ * SQLite only accepts: number, string, bigint, Buffer, null.
+ */
+function sanitize(val) {
+    if (val === undefined || val === null) return null;
+    if (typeof val === 'boolean') return val ? 1 : 0;
+    if (val instanceof Date) return val.toISOString();
+    if (typeof val === 'object' && !(val instanceof Buffer)) {
+        try { return JSON.stringify(val); } catch { return String(val); }
+    }
+    return val;
+}
 
 class QueryBuilder {
     constructor(table, io) {
         this.table = table;
         this.io = io;
         this._select = '*';
-        this._eq = [];
+        this._conditions = [];   // {type, field, value, op}
+        this._orderBy = [];
         this._limit = null;
         this._isSingle = false;
         this._insertData = null;
         this._updateData = null;
         this._deleteFlag = false;
+        this._returnSelect = false; // for .insert().select()
     }
 
     select(fields = '*') {
+        // If called after insert/update, it means "return the result"
+        if (this._insertData || this._updateData) {
+            this._returnSelect = true;
+            return this;
+        }
         this._select = fields;
         return this;
     }
 
     eq(field, value) {
-        this._eq.push({ field, value });
+        this._conditions.push({ type: 'eq', field, value: sanitize(value) });
+        return this;
+    }
+
+    not(field, op, value) {
+        this._conditions.push({ type: 'not', field, op, value: sanitize(value) });
+        return this;
+    }
+
+    in(field, values) {
+        this._conditions.push({ type: 'in', field, values: values.map(v => sanitize(v)) });
+        return this;
+    }
+
+    gte(field, value) {
+        this._conditions.push({ type: 'gte', field, value: sanitize(value) });
+        return this;
+    }
+
+    lte(field, value) {
+        this._conditions.push({ type: 'lte', field, value: sanitize(value) });
+        return this;
+    }
+
+    order(field, opts = {}) {
+        const dir = opts.ascending === false ? 'DESC' : (opts.ascending === true ? 'ASC' : 'DESC');
+        this._orderBy.push(`${field} ${dir}`);
         return this;
     }
 
@@ -49,66 +105,120 @@ class QueryBuilder {
         return this;
     }
 
-    async execute() {
-        if (this._insertData) {
-            const data = { ...this._insertData, id: this._insertData.id || crypto.randomUUID() };
-            const keys = Object.keys(data);
-            const values = Object.values(data);
-            const placeholders = keys.map(() => '?').join(', ');
-            
-            try {
-                db.prepare(`INSERT INTO ${this.table} (${keys.join(', ')}) VALUES (${placeholders})`).run(...values);
-                if (this.io) this.io.emit('db_change', { table: this.table, eventType: 'INSERT', new: data });
-                
-                if (this._select) {
-                    return { data, error: null };
+    // Build WHERE clause from conditions
+    _buildWhere() {
+        if (this._conditions.length === 0) return { clause: '', params: [] };
+
+        const parts = [];
+        const params = [];
+
+        for (const cond of this._conditions) {
+            if (cond.type === 'eq') {
+                parts.push(`${cond.field} = ?`);
+                params.push(cond.value);
+            } else if (cond.type === 'not') {
+                if (cond.op === 'is' && cond.value === null) {
+                    parts.push(`${cond.field} IS NOT NULL`);
+                } else if (cond.op === 'eq') {
+                    parts.push(`${cond.field} != ?`);
+                    params.push(cond.value);
+                } else {
+                    parts.push(`${cond.field} != ?`);
+                    params.push(cond.value);
                 }
-                return { data: null, error: null };
-            } catch (error) {
-                return { data: null, error: { message: error.message, code: error.code === 'SQLITE_CONSTRAINT_UNIQUE' ? '23505' : error.code } };
+            } else if (cond.type === 'in') {
+                const placeholders = cond.values.map(() => '?').join(', ');
+                parts.push(`${cond.field} IN (${placeholders})`);
+                params.push(...cond.values);
+            } else if (cond.type === 'gte') {
+                parts.push(`${cond.field} >= ?`);
+                params.push(cond.value);
+            } else if (cond.type === 'lte') {
+                parts.push(`${cond.field} <= ?`);
+                params.push(cond.value);
             }
         }
 
-        if (this._updateData) {
-            const keys = Object.keys(this._updateData);
-            const values = Object.values(this._updateData);
-            const setClause = keys.map(k => `${k} = ?`).join(', ');
-            
-            let whereClause = '';
-            const whereValues = [];
-            if (this._eq.length > 0) {
-                whereClause = 'WHERE ' + this._eq.map(c => `${c.field} = ?`).join(' AND ');
-                whereValues.push(...this._eq.map(c => c.value));
-            }
+        return { clause: 'WHERE ' + parts.join(' AND '), params };
+    }
+
+    _castBooleans(row) {
+        if (!row) return row;
+        if (row.is_from_me !== undefined) row.is_from_me = Boolean(row.is_from_me);
+        if (row.is_deleted !== undefined) row.is_deleted = Boolean(row.is_deleted);
+        if (row.is_valid !== undefined) row.is_valid = Boolean(row.is_valid);
+        if (row.is_enabled !== undefined) row.is_enabled = Boolean(row.is_enabled);
+        return row;
+    }
+
+    async execute() {
+        // ─── INSERT ───
+        if (this._insertData) {
+            const data = { ...this._insertData };
+            if (!data.id) data.id = crypto.randomUUID();
+
+            // Sanitize all values
+            const keys = Object.keys(data);
+            const values = keys.map(k => sanitize(data[k]));
+            const placeholders = keys.map(() => '?').join(', ');
 
             try {
-                db.prepare(`UPDATE ${this.table} SET ${setClause} ${whereClause}`).run(...values, ...whereValues);
-                
-                // Fetch the updated records to emit
-                const updated = db.prepare(`SELECT * FROM ${this.table} ${whereClause}`).all(...whereValues);
+                db.prepare(`INSERT INTO ${this.table} (${keys.join(', ')}) VALUES (${placeholders})`).run(...values);
+
+                // Read back the inserted row for accurate data
+                const inserted = db.prepare(`SELECT * FROM ${this.table} WHERE id = ?`).get(data.id);
+                const result = this._castBooleans(inserted || data);
+
+                if (this.io) {
+                    this.io.emit('db_change', { table: this.table, eventType: 'INSERT', new: result });
+                }
+
+                if (this._returnSelect && this._isSingle) {
+                    return { data: result, error: null };
+                }
+                return { data: result, error: null };
+            } catch (error) {
+                return {
+                    data: null,
+                    error: {
+                        message: error.message,
+                        code: error.message?.includes('UNIQUE') ? '23505' : error.code
+                    }
+                };
+            }
+        }
+
+        // ─── UPDATE ───
+        if (this._updateData) {
+            const keys = Object.keys(this._updateData);
+            const values = keys.map(k => sanitize(this._updateData[k]));
+            const setClause = keys.map(k => `${k} = ?`).join(', ');
+
+            const { clause, params } = this._buildWhere();
+
+            try {
+                db.prepare(`UPDATE ${this.table} SET ${setClause} ${clause}`).run(...values, ...params);
+
+                // Fetch updated rows and emit
+                const updated = db.prepare(`SELECT * FROM ${this.table} ${clause}`).all(...params);
                 if (this.io) {
                     updated.forEach(record => {
-                        this.io.emit('db_change', { table: this.table, eventType: 'UPDATE', new: record });
+                        this.io.emit('db_change', { table: this.table, eventType: 'UPDATE', new: this._castBooleans(record) });
                     });
                 }
                 return { data: null, error: null };
             } catch (error) {
-                return { data: null, error };
+                return { data: null, error: { message: error.message } };
             }
         }
 
+        // ─── DELETE ───
         if (this._deleteFlag) {
-            let whereClause = '';
-            const whereValues = [];
-            if (this._eq.length > 0) {
-                whereClause = 'WHERE ' + this._eq.map(c => `${c.field} = ?`).join(' AND ');
-                whereValues.push(...this._eq.map(c => c.value));
-            }
+            const { clause, params } = this._buildWhere();
             try {
-                // Fetch before delete to emit
-                const toDelete = db.prepare(`SELECT * FROM ${this.table} ${whereClause}`).all(...whereValues);
-                db.prepare(`DELETE FROM ${this.table} ${whereClause}`).run(...whereValues);
-                
+                const toDelete = db.prepare(`SELECT * FROM ${this.table} ${clause}`).all(...params);
+                db.prepare(`DELETE FROM ${this.table} ${clause}`).run(...params);
+
                 if (this.io) {
                     toDelete.forEach(record => {
                         this.io.emit('db_change', { table: this.table, eventType: 'DELETE', old: record });
@@ -116,47 +226,39 @@ class QueryBuilder {
                 }
                 return { data: null, error: null };
             } catch (error) {
-                return { data: null, error };
+                return { data: null, error: { message: error.message } };
             }
         }
 
-        // SELECT query
-        let whereClause = '';
-        const whereValues = [];
-        if (this._eq.length > 0) {
-            whereClause = 'WHERE ' + this._eq.map(c => `${c.field} = ?`).join(' AND ');
-            whereValues.push(...this._eq.map(c => c.value));
+        // ─── SELECT ───
+        const { clause, params } = this._buildWhere();
+
+        let orderClause = '';
+        if (this._orderBy.length > 0) {
+            orderClause = 'ORDER BY ' + this._orderBy.join(', ');
         }
 
         let limitClause = '';
         if (this._limit) limitClause = `LIMIT ${this._limit}`;
-        
+
         try {
-            const query = `SELECT ${this._select} FROM ${this.table} ${whereClause} ${limitClause}`;
+            const sql = `SELECT ${this._select} FROM ${this.table} ${clause} ${orderClause} ${limitClause}`;
+
             if (this._isSingle) {
-                const data = db.prepare(query).get(...whereValues);
+                const data = db.prepare(sql).get(...params);
                 if (!data) return { data: null, error: { code: 'PGRST116', message: 'No rows found' } };
-                
-                // SQLite returns 1/0 for boolean, cast back
-                if (data.is_from_me !== undefined) data.is_from_me = Boolean(data.is_from_me);
-                if (data.is_deleted !== undefined) data.is_deleted = Boolean(data.is_deleted);
-                if (data.is_valid !== undefined) data.is_valid = Boolean(data.is_valid);
-                
-                return { data, error: null };
+                return { data: this._castBooleans(data), error: null };
             } else {
-                const data = db.prepare(query).all(...whereValues);
-                data.forEach(d => {
-                    if (d.is_from_me !== undefined) d.is_from_me = Boolean(d.is_from_me);
-                    if (d.is_deleted !== undefined) d.is_deleted = Boolean(d.is_deleted);
-                    if (d.is_valid !== undefined) d.is_valid = Boolean(d.is_valid);
-                });
+                const data = db.prepare(sql).all(...params);
+                data.forEach(d => this._castBooleans(d));
                 return { data, error: null };
             }
         } catch (error) {
-            return { data: null, error };
+            return { data: null, error: { message: error.message } };
         }
     }
 
+    // Allow await on QueryBuilder directly
     then(resolve, reject) {
         this.execute().then(resolve).catch(reject);
     }
@@ -170,9 +272,22 @@ const createClient = () => {
         from: (table) => new QueryBuilder(table, globalIo),
         storage: {
             from: (bucket) => ({
-                upload: () => { throw new Error('Not implemented locally. Check logic.') }
+                upload: () => ({ data: null, error: { message: 'Local storage: use filesystem directly.' } }),
+                getPublicUrl: (filePath) => ({ data: { publicUrl: `/uploads/${filePath}` } })
             })
-        }
+        },
+        // Stub for auth calls (no-op, we use JWT now)
+        auth: {
+            signInWithPassword: async () => ({ data: null, error: { message: 'Use /api/local/login instead' } }),
+            getSession: async () => ({ data: { session: null } }),
+            signOut: async () => ({ error: null }),
+        },
+        // Stub for channel/realtime (no-op, we use Socket.io now)
+        channel: () => ({
+            on: function() { return this; },
+            subscribe: function() { return this; },
+        }),
+        removeChannel: () => {},
     };
 };
 
