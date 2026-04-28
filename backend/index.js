@@ -318,18 +318,6 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                     throw createError;
                 }
             }
-
-            if (createError) {
-                console.log(`[DEBUG] ⚠️ Gagal create customer:`, createError);
-                if (createError.code === '23505') {
-                    const { data: existing } = await supabase.from('customers').select('*').eq('phone_number', customerPhoneNumber).single();
-                    customer = existing;
-                } else {
-                    throw createError;
-                }
-            } else {
-                customer = newCustomer;
-            }
         } else {
             // Pelanggan sudah ada — Update 'Last Activity' (created_at) jika pesan ini lebih baru
             // Saat resync massal, kita gunakan waktu pesan asli, bukan waktu 'SEKARANG'.

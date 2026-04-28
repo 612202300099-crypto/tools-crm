@@ -23,8 +23,12 @@ db.exec(`
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         customer_id TEXT NOT NULL,
+        wa_id TEXT,
         body TEXT,
         is_from_me BOOLEAN DEFAULT 0,
+        message_hash TEXT UNIQUE,
+        is_deleted BOOLEAN DEFAULT 0,
+        deleted_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE
     );
