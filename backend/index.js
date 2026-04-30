@@ -85,17 +85,18 @@ const client = new Client({
     authStrategy: new LocalAuth({ clientId: "crm-polaroid" }),
     puppeteer: {
         headless: true,
-        // [BEST PRACTICE] Args dioptimasi untuk VPS RAM 2GB
+        // [BEST PRACTICE] Args optimasi resource untuk Local Server (Laptop 24/7)
         args: [
             '--no-sandbox', 
             '--disable-setuid-sandbox', 
-            '--disable-dev-shm-usage', 
+            '--disable-dev-shm-usage', // Mencegah crash memori di environment terbatas
             '--disable-accelerated-2d-canvas', 
             '--no-first-run', 
             '--no-zygote', 
             '--disable-gpu',
             '--disable-extensions',
-            '--js-flags="--max-old-space-size=1536"' // Limit heap memory
+            // Alokasi RAM yang seimbang (768MB) mencegah Swap Thrashing tanpa membuat V8 agresif
+            '--js-flags="--max-old-space-size=768"'
         ]
     }
 });
@@ -404,13 +405,19 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
 }
 
 
+// [WATCHDOG LEVEL 1] Penjaga Inisialisasi
+// Jika WA stuck loading lebih dari 3 menit tanpa QR atau Ready, paksa restart.
+let initializationTimer = null;
+
 client.on('qr', (qr) => {
+    if (initializationTimer) clearTimeout(initializationTimer); // Jangan restart jika sedang tunggu QR
     qrCodeData = qr;
     isConnected = false;
     console.log('New QR code generated - please scan');
 });
 
 client.on('ready', async () => {
+    if (initializationTimer) clearTimeout(initializationTimer); // Matikan timer darurat
     console.log('✅ WhatsApp Client is ready!');
     isConnected = true;
     qrCodeData = '';
@@ -632,7 +639,44 @@ app.post('/api/wa/deep-resync', async (req, res) => {
     })();
 });
 
-client.initialize();
+// [PRE-FLIGHT] Rutinitas Pembersihan Cache Chromium sebelum start
+async function clearBrowserCache() {
+    const authPath = path.join(__dirname, '.wwebjs_auth', 'session-crm-polaroid', 'Default');
+    const cacheDirs = [
+        path.join(authPath, 'Cache'),
+        path.join(authPath, 'Code Cache'),
+        path.join(authPath, 'Service Worker', 'CacheStorage')
+    ];
+    let cleaned = false;
+    for (const dir of cacheDirs) {
+        if (fs.existsSync(dir)) {
+            try {
+                await fs.promises.rm(dir, { recursive: true, force: true });
+                cleaned = true;
+            } catch (e) { /* Abaikan jika file sedang terkunci */ }
+        }
+    }
+    if (cleaned) console.log(`[PRE-FLIGHT] 🧹 Sisa cache browser lama berhasil dibersihkan.`);
+}
+
+// Inisialisasi WA dengan Proteksi Penuh
+(async () => {
+    try {
+        await clearBrowserCache();
+        console.log('[SYSTEM] 🚀 Memulai inisialisasi WA Engine...');
+        
+        // Aktifkan timer 3 menit. Jika tak sampai 'ready' atau 'qr', paksa restart.
+        initializationTimer = setTimeout(() => {
+            console.error('🔥 [FATAL] WA Engine nyangkut saat inisialisasi (Timeout 3 Menit). Memicu Auto-Restart...');
+            process.exit(1);
+        }, 3 * 60 * 1000);
+
+        await client.initialize();
+    } catch (error) {
+        console.error('❌ [FATAL] Gagal menginisialisasi client WA:', error.message);
+        process.exit(1);
+    }
+})();
 
 // Endpoint status
 app.get('/api/wa/status', (req, res) => {
