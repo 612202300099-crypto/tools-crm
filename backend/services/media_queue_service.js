@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { MessageMedia } = require('whatsapp-web.js');
+const { convertHeicToJpg } = require('../utils/heicConverter');
 
 /**
  * MediaQueueService
@@ -165,11 +166,24 @@ class MediaQueueService {
             if (!media || !media.data) throw new Error('Data media kosong');
 
             // 3. Simpan ke VPS
-            const buffer = Buffer.from(media.data, 'base64');
+            let buffer = Buffer.from(media.data, 'base64');
             const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E6);
             let fileExt = (media.mimetype || 'image/jpeg').split('/')[1].split(';')[0];
-            const ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
+            let ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
             
+            // 🎯 DETEKSI DAN KONVERSI HEIC
+            if (ext.toLowerCase() === 'heic' || (media.filename && media.filename.toLowerCase().endsWith('.heic'))) {
+                console.log(`[W-${workerId}] 🔄 Memulai konversi HEIC -> JPG...`);
+                try {
+                    buffer = await convertHeicToJpg(buffer);
+                    ext = 'jpg';
+                    console.log(`[W-${workerId}] ✅ Konversi HEIC sukses!`);
+                } catch (err) {
+                    console.error(`[W-${workerId}] ❌ Gagal konversi HEIC:`, err.message);
+                    // Jika gagal, sistem akan tetap simpan sebagai file asli (HEIC)
+                }
+            }
+
             const fileName = `${job.customerId}/foto-${uniqueSuffix}.${ext}`;
             const uploadsDir = path.join(__dirname, '../uploads', job.customerId.toString());
             
@@ -179,6 +193,7 @@ class MediaQueueService {
             fs.writeFileSync(filePath, buffer);
 
             const publicUrl = `${this.PUBLIC_API_URL}/uploads/${fileName}`;
+
 
             // 4. Cari Message di DB (Timeout Guard)
             const { data: msgRecord, error: msgFindError } = await this.withTimeout(
