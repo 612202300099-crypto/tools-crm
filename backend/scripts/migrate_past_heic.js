@@ -1,16 +1,13 @@
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env') });
-const { createClient } = require('@supabase/supabase-js');
 const fs = require('fs');
 const path = require('path');
 const { convertHeicToJpg } = require('../utils/heicConverter');
-
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
-const supabase = createClient(process.env.SUPABASE_URL, supabaseKey);
+const db = require('../db'); // Menggunakan database SQLite lokal
 
 const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com';
 
 async function migratePastHeic() {
-    console.log("=== MEMULAI MIGRASI DATA HEIC LAMA ===");
+    console.log("=== MEMULAI MIGRASI DATA HEIC LAMA (LOCAL DB) ===");
     
     const uploadsDir = path.join(__dirname, '../uploads');
     if (!fs.existsSync(uploadsDir)) {
@@ -20,7 +17,7 @@ async function migratePastHeic() {
 
     let hasMore = true;
     let offset = 0;
-    const limit = 50; // Proses per 50 agar RAM server tetap lega
+    const limit = 50;
 
     let totalSuccess = 0;
     let totalFail = 0;
@@ -29,17 +26,12 @@ async function migratePastHeic() {
     while (hasMore) {
         console.log(`\n🔍 Fetching batch HEIC dari index ${offset}...`);
         
-        // Cari semua file yang ujungnya .heic
-        const { data: mediaFiles, error } = await supabase
-            .from('media')
-            .select('*')
-            .ilike('file_name', '%.heic')
-            .range(offset, offset + limit - 1);
-
-        if (error) {
-            console.error("Gagal mengambil data dari Supabase:", error.message);
-            break;
-        }
+        // Query langsung ke SQLite
+        const mediaFiles = db.prepare(`
+            SELECT * FROM media 
+            WHERE file_name LIKE '%.heic' OR file_name LIKE '%.HEIC'
+            LIMIT ? OFFSET ?
+        `).all(limit, offset);
 
         if (!mediaFiles || mediaFiles.length === 0) {
             hasMore = false;
@@ -72,17 +64,13 @@ async function migratePastHeic() {
                 // 5. Simpan file JPG ke disk
                 fs.writeFileSync(newFilePath, jpgBuffer);
 
-                // 6. Update database Supabase
+                // 6. Update database lokal SQLite
                 const newLocalUrl = `${PUBLIC_API_URL}/uploads/${newFileName}`;
-                const { error: updateError } = await supabase
-                    .from('media')
-                    .update({ 
-                        file_name: newFileName, 
-                        file_url: newLocalUrl 
-                    })
-                    .eq('id', media.id);
-
-                if (updateError) throw new Error(`Supabase Update Error: ${updateError.message}`);
+                try {
+                    db.prepare(`UPDATE media SET file_name = ?, file_url = ? WHERE id = ?`).run(newFileName, newLocalUrl, media.id);
+                } catch (updateError) {
+                    throw new Error(`DB Update Error: ${updateError.message}`);
+                }
 
                 // 7. Hapus file HEIC lama (Hemat disk VPS)
                 fs.unlinkSync(oldFilePath);
