@@ -52,7 +52,7 @@ async function runCleanup() {
             const filePath = path.join(__dirname, '..', 'uploads', media.file_name);
             
             try {
-                // Hapus file fisik di VPS
+                // [BEST PRACTICE] Resource Management: Hapus permanen file fisik untuk menghemat disk VPS/Lokal
                 if (fs.existsSync(filePath)) {
                     fs.unlinkSync(filePath);
                 }

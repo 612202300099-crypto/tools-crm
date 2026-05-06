@@ -4,8 +4,14 @@ const db = require('./db');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'crm-super-secret-key-2026';
-const ADMIN_EMAIL = 'admin@polaroid.com';
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'admin@polaroid.com';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'polaroid123';
+
+// [BEST PRACTICE] Peringatan Keamanan jika menggunakan default credentials di Production
+if (!process.env.JWT_SECRET || !process.env.ADMIN_PASSWORD || !process.env.ADMIN_EMAIL) {
+    console.warn('\\n⚠️ [SECURITY WARNING] Menggunakan Kredensial Admin Default!');
+    console.warn('Sangat disarankan mengatur JWT_SECRET, ADMIN_EMAIL, dan ADMIN_PASSWORD di file .env.\\n');
+}
 
 // Middleware Auth
 const authenticateToken = (req, res, next) => {

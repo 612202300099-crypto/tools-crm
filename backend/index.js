@@ -13,9 +13,23 @@ const cron = require('node-cron');
 const cleanupService = require('./services/cleanup_service');
 const StabilityManager = require('./services/stability_manager');
 const MediaQueueService = require('./services/media_queue_service');
-const { checkAndRespond, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
+const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
 const { router: localApiRouter } = require('./api');
+
+// [BEST PRACTICE] Global Error Catcher (Safety & No Red Logs)
+// Mencegah server Node.js mati mendadak karena error yang tidak tertangkap.
+process.on('uncaughtException', (err) => {
+    console.error('\\n🚨 [GLOBAL ERROR] Uncaught Exception terdeteksi:');
+    console.error(err.stack || err.message);
+    console.error('ℹ️ Server tetap berjalan berkat pelindung global.\\n');
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('\\n🚨 [GLOBAL ERROR] Unhandled Promise Rejection terdeteksi:');
+    console.error(reason);
+    console.error('ℹ️ Promise yang gagal diabaikan untuk menjaga stabilitas server.\\n');
+});
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -85,18 +99,29 @@ const client = new Client({
     authStrategy: new LocalAuth({ clientId: "crm-polaroid" }),
     puppeteer: {
         headless: true,
-        // [BEST PRACTICE] Args optimasi resource untuk Local Server (Laptop 24/7)
+        // [BEST PRACTICE] Gunakan Chrome yang sudah terinstall di Windows
+        // agar tidak perlu download bundled Chromium (lebih stabil & hemat disk)
+        executablePath: (() => {
+            const chromePaths = [
+                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+                process.env.CHROME_PATH, // Bisa dioverride via .env
+            ];
+            const found = chromePaths.find(p => p && require('fs').existsSync(p));
+            if (found) console.log(`[PUPPETEER] ✅ Menggunakan Chrome: ${found}`);
+            else console.warn('[PUPPETEER] ⚠️ Chrome tidak ditemukan di path default. Gunakan bundled Chromium.');
+            return found || undefined;
+        })(),
         args: [
-            '--no-sandbox', 
-            '--disable-setuid-sandbox', 
-            '--disable-dev-shm-usage', // Mencegah crash memori di environment terbatas
-            '--disable-accelerated-2d-canvas', 
-            '--no-first-run', 
-            '--no-zygote', 
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
             '--disable-gpu',
             '--disable-extensions',
-            // Alokasi RAM yang seimbang (768MB) mencegah Swap Thrashing tanpa membuat V8 agresif
-            '--js-flags="--max-old-space-size=768"'
+            '--js-flags=--max-old-space-size=768'
         ]
     }
 });
@@ -387,13 +412,14 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             if (!isFromMe) {
                 console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang (Prioritas: ${isPriority})...`);
                 mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, isPriority);
+                // [UPGRADE] Setelah media masuk, cek kebutuhan foto & kirim konfirmasi otomatis
+                setImmediate(() => checkAndRespondMedia(client, customer, supabase));
             } else {
                 console.log(`[DEBUG] ⏭️ Media dari Bot/Admin dideteksi. Abaikan antrian.`);
             }
         }
-        // ─── AI FOLLOW-UP: Minta nomor pesanan jika belum ada ─────────────────
-        // Dipanggil SETELAH customer & pesan tersimpan ke DB, sebelum fungsi selesai.
-        // Hanya berjalan untuk pesan teks dari customer (bukan media, bukan fromMe)
+        // ─── AI FOLLOW-UP: Alur teks — tagih no pesanan, konfirmasi foto, dst ──
+        // Hanya berjalan untuk pesan TEKS dari customer (bukan media, bukan fromMe)
         if (!message.hasMedia && !isFromMe && customer) {
             await checkAndRespond(client, customer, message, supabase);
         }

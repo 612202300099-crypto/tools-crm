@@ -8,7 +8,7 @@ const db = new Database(dbPath);
 // Enable WAL mode for better concurrency and performance
 db.pragma('journal_mode = WAL');
 
-// Initialize schema
+// Initialize schema — Tabel utama
 db.exec(`
     CREATE TABLE IF NOT EXISTS customers (
         id TEXT PRIMARY KEY,
@@ -55,5 +55,30 @@ db.exec(`
 
     INSERT OR IGNORE INTO ai_config (id, is_enabled) VALUES (1, 1);
 `);
+
+// ── [MIGRATION] Tambah kolom baru untuk fitur Spreadsheet Integration ──────────
+// Menggunakan ALTER TABLE yang aman (tidak error jika kolom sudah ada)
+const existingColumns = db.prepare("PRAGMA table_info(customers)").all().map(c => c.name);
+
+if (!existingColumns.includes('store_name')) {
+    db.exec(`ALTER TABLE customers ADD COLUMN store_name TEXT;`);
+    console.log('[DB] ✅ Migration: Kolom store_name ditambahkan ke tabel customers.');
+}
+if (!existingColumns.includes('order_detail')) {
+    db.exec(`ALTER TABLE customers ADD COLUMN order_detail TEXT;`);
+    console.log('[DB] ✅ Migration: Kolom order_detail ditambahkan ke tabel customers.');
+}
+if (!existingColumns.includes('required_photos')) {
+    db.exec(`ALTER TABLE customers ADD COLUMN required_photos INTEGER DEFAULT 0;`);
+    console.log('[DB] ✅ Migration: Kolom required_photos ditambahkan ke tabel customers.');
+}
+if (!existingColumns.includes('photo_confirmed')) {
+    db.exec(`ALTER TABLE customers ADD COLUMN photo_confirmed BOOLEAN DEFAULT 0;`);
+    console.log('[DB] ✅ Migration: Kolom photo_confirmed ditambahkan ke tabel customers.');
+}
+if (!existingColumns.includes('photo_followup_count')) {
+    db.exec(`ALTER TABLE customers ADD COLUMN photo_followup_count INTEGER DEFAULT 0;`);
+    console.log('[DB] ✅ Migration: Kolom photo_followup_count ditambahkan ke tabel customers.');
+}
 
 module.exports = db;
