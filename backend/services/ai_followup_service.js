@@ -213,9 +213,22 @@ async function sendExampleImage(waClient, phoneNumber, config, supabase, custome
 async function handleOrderFound(waClient, customer, orderResult, supabase) {
     const { store, storeName, items, totalPhotosNeeded, hasPolaroid } = orderResult;
 
-    // [BUG FIX] Status harus tetap 'BELUM_KIRIM_FOTO' karena kita baru minta foto,
-    // bukan 'SUDAH_KIRIM_FOTO'. Status diubah ke SUDAH hanya setelah foto diterima.
+    // Buat label SKU untuk kolom nama di dashboard
+    // Format: SKU produk pertama (utamakan yang Polaroid)
+    const polaroidItem = items.find(i => i.isPolaroid);
+    const mainItem = polaroidItem || items[0];
+    const skuLabel = mainItem ? (mainItem.sku || mainItem.productName.substring(0, 20)) : '';
+
+    // [FEATURE] Update nama customer dengan info SKU agar terlihat di dashboard
+    // Format: "Nama Asli | SKU: KODE_SKU"
+    const currentName = customer.name || 'Pelanggan';
+    const baseName = currentName.includes(' | SKU:') ? currentName.split(' | SKU:')[0] : currentName;
+    const newName = skuLabel ? `${baseName} | SKU: ${skuLabel}` : baseName;
+
+    // [BUG FIX] Status harus BELUM_KIRIM_FOTO karena kita baru minta foto,
+    // bukan SUDAH_KIRIM_FOTO. Status diubah ke SUDAH hanya setelah foto diterima.
     await supabase.from('customers').update({
+        name: newName,
         store_name: store,
         order_detail: JSON.stringify(items),
         required_photos: totalPhotosNeeded,
@@ -226,8 +239,9 @@ async function handleOrderFound(waClient, customer, orderResult, supabase) {
     const detailMsg = formatOrderDetailMessage(orderResult);
     await sendWAMessage(waClient, customer.phone_number, detailMsg);
 
-    console.log(`[AI-BOT] ✅ Detail pesanan ${customer.order_id} dikirim ke ${customer.phone_number} (${storeName}, foto dibutuhkan: ${totalPhotosNeeded})`);
+    console.log(`[AI-BOT] ✅ Detail pesanan ${customer.order_id} dikirim ke ${customer.phone_number} (${storeName}, foto dibutuhkan: ${totalPhotosNeeded}, SKU: ${skuLabel})`);
 }
+
 
 // ─── Handler: Nomor Pesanan Tidak Ditemukan ───────────────────────────────────
 async function handleOrderNotFound(waClient, customer, orderId, supabase) {
@@ -358,17 +372,20 @@ async function checkAndRespond(waClient, customer, message, supabase) {
 
         const msgText = (message.body || '').trim();
 
-        // ── FASE A: Customer belum punya nomor pesanan → Tagih ────────────────
+        // ── FASE A: Customer belum punya nomor pesanan ─────────────────────────
         if (!customer.order_id) {
             const foundOrderId = detectOrderId(msgText);
 
             if (foundOrderId) {
+                // [CRITICAL FIX] Deteksi nomor pesanan SELALU diproses ke spreadsheet
+                // TIDAK bergantung pada is_enabled. Customer yang kirim nomor pesanan
+                // WAJIB mendapat balasan detail, apapun kondisi bot.
                 console.log(`[AI-BOT] 🔢 Nomor pesanan ditemukan: ${foundOrderId} dari ${customer.phone_number}`);
 
                 // Simpan order_id dulu ke DB agar tidak diproses duplikat
                 await supabase.from('customers').update({ order_id: foundOrderId }).eq('id', customer.id);
 
-                // Lookup ke spreadsheet
+                // Lookup ke spreadsheet (tidak perlu API key Sheets jika belum diisi = return null)
                 const orderResult = await lookupOrder(foundOrderId);
 
                 if (!orderResult) {
@@ -385,9 +402,21 @@ async function checkAndRespond(waClient, customer, message, supabase) {
                 return;
             }
 
-            // Tidak ada nomor pesanan → AI tagih dengan sopan
+            // Tidak ada nomor pesanan → cek apakah bot aktif sebelum balas
             const config = await getCachedAiConfig(supabase);
-            if (!config.is_enabled) return;
+
+            // [BEST PRACTICE] is_enabled hanya mengontrol "apakah bot mengejar customer"
+            // Jika false, biarkan admin handle manual. Tidak error, hanya diam.
+            if (!config || !config.is_enabled) {
+                console.log(`[AI-BOT] ℹ️ Bot dinonaktifkan (is_enabled=false). Pesan dari ${customer.phone_number} diabaikan.`);
+                return;
+            }
+
+            // System prompt kosong = tidak bisa balas AI. Skip dengan aman.
+            if (!config.system_prompt || !config.system_prompt.trim()) {
+                console.log(`[AI-BOT] ⚠️ system_prompt kosong di ai_config. Isi di dashboard Admin → Settings.`);
+                return;
+            }
 
             const { data: recentMessages } = await supabase
                 .from('messages')
@@ -410,7 +439,7 @@ async function checkAndRespond(waClient, customer, message, supabase) {
             return;
         }
 
-        // ── FASE B: Customer sudah punya order_id, cek status foto ───────────
+        // ── FASE B: Customer sudah punya order_id, cek jawaban konfirmasi foto ──
         // Ambil data customer terbaru
         const { data: freshCustomer } = await supabase
             .from('customers')

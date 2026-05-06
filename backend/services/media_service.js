@@ -9,9 +9,18 @@ const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
 
-const openaiClient = new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-});
+// [BEST PRACTICE] Lazy-init: Jangan buat client saat module di-load.
+// Ini mencegah crash jika OPENAI_API_KEY tidak diisi di .env.
+let _openaiClient = null;
+function getOpenAiClient() {
+    if (_openaiClient) return _openaiClient;
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey || apiKey.includes('sk-test') || apiKey.includes('fake')) {
+        throw new Error('[MEDIA-SVC] OPENAI_API_KEY tidak diisi. Fitur scan gambar tidak tersedia.');
+    }
+    _openaiClient = new OpenAI({ apiKey });
+    return _openaiClient;
+}
 
 /**
  * Scan satu gambar menggunakan OpenAI Vision untuk menemukan 18-digit Nomor Pesanan.
@@ -29,7 +38,7 @@ async function scanImageForOrderId(filePath) {
     const mimeMap = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' };
     const mimeType = mimeMap[ext] || 'image/jpeg';
 
-    const completion = await openaiClient.chat.completions.create({
+    const completion = await getOpenAiClient().chat.completions.create({
         model: 'gpt-4o',
         messages: [
             {
