@@ -17,19 +17,49 @@ const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidate
 
 const { router: localApiRouter } = require('./api');
 
-// [BEST PRACTICE] Global Error Catcher (Safety & No Red Logs)
-// Mencegah server Node.js mati mendadak karena error yang tidak tertangkap.
+// [BEST PRACTICE] Global Error Catcher — Server Tidak Pernah Mati
+// Mencegah server Node.js crash karena error yang tidak tertangkap.
 process.on('uncaughtException', (err) => {
-    console.error('\\n🚨 [GLOBAL ERROR] Uncaught Exception terdeteksi:');
+    // [CRITICAL FIX] Error Puppeteer ini BUKAN fatal — terjadi saat WA
+    // sedang navigate/load halaman. Jika dibiarkan crash → PM2 restart →
+    // session rusak → harus scan QR lagi. Solusi: SKIP saja.
+    const PUPPETEER_NOISE = [
+        'Execution context was destroyed',
+        'Session closed',
+        'Target closed',
+        'detached Frame',
+        'Protocol error',
+        'waitForChatLoading',
+        'Cannot read properties of null',
+    ];
+    if (PUPPETEER_NOISE.some(msg => err.message?.includes(msg))) {
+        console.warn(`[PUPPETEER-GUARD] ⚠️ Browser noise terdeteksi (skip): ${err.message.substring(0, 80)}`);
+        return; // JANGAN crash — ini normal saat WA Web loading
+    }
+    console.error('\n🚨 [GLOBAL ERROR] Uncaught Exception terdeteksi:');
     console.error(err.stack || err.message);
-    console.error('ℹ️ Server tetap berjalan berkat pelindung global.\\n');
+    console.error('ℹ️ Server tetap berjalan berkat pelindung global.\n');
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-    console.error('\\n🚨 [GLOBAL ERROR] Unhandled Promise Rejection terdeteksi:');
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    const PUPPETEER_NOISE = [
+        'Execution context was destroyed',
+        'Session closed',
+        'Target closed',
+        'detached Frame',
+        'Protocol error',
+        'waitForChatLoading',
+    ];
+    if (PUPPETEER_NOISE.some(noise => msg?.includes(noise))) {
+        console.warn(`[PUPPETEER-GUARD] ⚠️ Promise rejection browser (skip): ${msg.substring(0, 80)}`);
+        return; // JANGAN crash
+    }
+    console.error('\n🚨 [GLOBAL ERROR] Unhandled Promise Rejection terdeteksi:');
     console.error(reason);
-    console.error('ℹ️ Promise yang gagal diabaikan untuk menjaga stabilitas server.\\n');
+    console.error('ℹ️ Promise yang gagal diabaikan untuk menjaga stabilitas server.\n');
 });
+
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -95,33 +125,61 @@ let qrCodeData = '';
 let isConnected = false;
 const contactCache = new Map(); // [GLOBAL CACHE] LID -> JID/Phone Mapping
 
+// ─── Deteksi Chrome/Chromium Cross-Platform (Windows & Linux VPS) ───────────────
+function detectChromePath() {
+    const fs = require('fs');
+    const CHROME_ENV = process.env.CHROME_PATH;
+
+    // Prioritas: env override dulu
+    if (CHROME_ENV && fs.existsSync(CHROME_ENV)) {
+        console.log(`[PUPPETEER] ✅ Chrome dari CHROME_PATH env: ${CHROME_ENV}`);
+        return CHROME_ENV;
+    }
+
+    const candidates = [
+        // ── Linux VPS (urutan prioritas: Chrome stable → Chromium → snap) ──
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium',
+        '/snap/bin/chromium',
+        '/usr/lib/chromium-browser/chromium-browser',
+        // ── Windows (lokal dev) ──
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ];
+
+    const found = candidates.find(p => p && fs.existsSync(p));
+    if (found) {
+        console.log(`[PUPPETEER] ✅ Menggunakan browser: ${found}`);
+        return found;
+    }
+
+    // Tidak ada yang ditemukan — pakai bundled Chromium dari puppeteer
+    console.warn('[PUPPETEER] ⚠️ Tidak ada Chrome/Chromium di system. Menggunakan bundled Chromium.');
+    console.warn('[PUPPETEER] 💡 TIP: Install Chrome di VPS → apt-get install -y google-chrome-stable');
+    return undefined;
+}
+
 const client = new Client({
     authStrategy: new LocalAuth({ clientId: "crm-polaroid" }),
     puppeteer: {
         headless: true,
-        // [BEST PRACTICE] Gunakan Chrome yang sudah terinstall di Windows
-        // agar tidak perlu download bundled Chromium (lebih stabil & hemat disk)
-        executablePath: (() => {
-            const chromePaths = [
-                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-                process.env.CHROME_PATH, // Bisa dioverride via .env
-            ];
-            const found = chromePaths.find(p => p && require('fs').existsSync(p));
-            if (found) console.log(`[PUPPETEER] ✅ Menggunakan Chrome: ${found}`);
-            else console.warn('[PUPPETEER] ⚠️ Chrome tidak ditemukan di path default. Gunakan bundled Chromium.');
-            return found || undefined;
-        })(),
+        executablePath: detectChromePath(),
+        // [BEST PRACTICE] Args optimasi untuk VPS Linux 24/7
         args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
+            '--no-sandbox',               // Wajib di Linux tanpa root sandboxing
+            '--disable-setuid-sandbox',   // Wajib di Linux
+            '--disable-dev-shm-usage',    // Cegah crash RAM /dev/shm kecil di VPS
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu',
+            '--no-zygote',                // Cegah proses zombie di VPS
+            '--disable-gpu',              // VPS tidak punya GPU
             '--disable-extensions',
-            '--js-flags=--max-old-space-size=768'
+            '--disable-background-timer-throttling',
+            '--disable-backgrounding-occluded-windows',
+            '--disable-renderer-backgrounding',
+            '--js-flags=--max-old-space-size=512'  // 512MB lebih aman di VPS
         ]
     }
 });
@@ -451,7 +509,8 @@ client.on('ready', async () => {
     stability.start(); // Mulai pemantauan stabilitas
     await hydrateContactCache();
 
-    // [STARTUP SYNC]
+    // [STARTUP SYNC] Ambil pesan 48 jam terakhir (diperluas dari 24 jam)
+    // Alasan: Jika server sempat mati semalaman, semua chat tetap terrecovery
     try {
         let chats = [];
         try {
@@ -460,11 +519,12 @@ client.on('ready', async () => {
             console.error('❌ Gagal mengambil daftar chat saat startup:', getChatsErr.message);
             return;
         }
-        
+
         const targetDate = new Date();
-        targetDate.setDate(targetDate.getDate() - 1);
+        targetDate.setDate(targetDate.getDate() - 2); // [FIX] 48 jam (bukan 24 jam)
         const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
-        
+        console.log(`[SYNC] 🕐 Menyinkronkan pesan sejak: ${targetDate.toLocaleString('id-ID')}`);
+
         let processedCount = 0;
         let errorCount = 0;
 
@@ -508,9 +568,28 @@ client.on('ready', async () => {
     }
 });
 
-client.on('disconnected', (reason) => {
-    console.log('WhatsApp Client disconnected:', reason);
+client.on('disconnected', async (reason) => {
+    console.log(`[WA] ⚠️ WhatsApp Client disconnected: ${reason}`);
     isConnected = false;
+    stability.stop();
+
+    // Jika LOGOUT (bukan sekedar disconnect jaringan), session perlu di-reinit
+    if (reason === 'LOGOUT') {
+        console.log('[WA] 🔒 Session logout terdeteksi. QR scan baru diperlukan.');
+        return; // Biarkan PM2 restart secara alami
+    }
+
+    // Untuk disconnect sementara (jaringan putus, dll) — tunggu sebentar lalu reinit
+    console.log(`[WA] 🔄 Mencoba reinisialisasi dalam 10 detik...`);
+    setTimeout(async () => {
+        try {
+            console.log('[WA] 🔄 Menjalankan client.initialize() ulang...');
+            await client.initialize();
+        } catch (reinitErr) {
+            console.error('[WA] ❌ Gagal reinisialisasi. PM2 akan restart:', reinitErr.message);
+            process.exit(1); // Biarkan PM2 restart prosesnya
+        }
+    }, 10000);
 });
 
 // Gunakan message_create agar menangkap pesan dari kita juga (yang dikirim lewat HP)
