@@ -873,31 +873,37 @@ app.post('/api/wa/resync', async (req, res) => {
     const { phone_number, customer_id } = req.body;
     if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
     
-    try {
-        const chatId = phone_number + '@c.us';
-        const chat = await withTimeout(client.getChatById(chatId), 30000, 'getChatById_API');
-        
-        console.log(`[RESYNC - SAFE MODE] Memulai penyisiran ulang history untuk: ${phone_number}`);
-        // KOREKSI: Kita TIDAK LAGI MENGHAPUS data lama. 
-        // Logika processMessageCommand sudah otomatis melakukan 'Healing' (menambah yang kurang, skip yang sudah ada).
-        // Ini mencegah resiko chat hilang jika koneksi terputus di tengah jalan.
+    // [FIX] Kirim response LANGSUNG ke frontend — proses di background
+    // Ini mencegah timeout di sisi client (Vercel/browser punya batas ~30 detik)
+    res.json({ success: true, message: 'Gali ulang dimulai di latar belakang. Pesan & foto akan muncul otomatis.' });
 
-        console.log(`[RESYNC] Mendownload ulang history 1000 pesan terakhir...`);
-        const historyMessages = await withTimeout(chat.fetchMessages({ limit: 1000 }), 60000, 'fetchMessages_API');
-        
-        let count = 0;
-        for (const msg of historyMessages) {
-            // [VVIP] Klik Tombol "Gali Ulang" menggunakan Prioritas Tinggi (true)
-            await processMessageCommand(msg, true, true);
-            count++;
+    // Proses di background (non-blocking)
+    setImmediate(async () => {
+        try {
+            const chatId = phone_number + '@c.us';
+            const chat = await withTimeout(client.getChatById(chatId), 30000, 'getChatById_resync');
+            
+            console.log(`[RESYNC - SAFE MODE] Memulai penyisiran ulang history untuk: ${phone_number}`);
+            // KOREKSI: Kita TIDAK LAGI MENGHAPUS data lama. 
+            // Logika processMessageCommand sudah otomatis melakukan 'Healing' (menambah yang kurang, skip yang sudah ada).
+
+            // [FIX] Timeout ditingkatkan: 120s (sebelumnya 60s)
+            // Limit dikurangi: 500 (sebelumnya 1000) — pesan terbaru lebih penting
+            console.log(`[RESYNC] Mendownload ulang history 500 pesan terakhir...`);
+            const historyMessages = await withTimeout(chat.fetchMessages({ limit: 500 }), 120000, 'fetchMessages_resync');
+            
+            let count = 0;
+            for (const msg of historyMessages) {
+                // [VVIP] Klik Tombol "Gali Ulang" menggunakan Prioritas Tinggi (true)
+                await processMessageCommand(msg, true, true);
+                count++;
+            }
+            
+            console.log(`[RESYNC] ✅ Selesai! Berhasil menyisir ${count} pesan untuk ${phone_number}.`);
+        } catch (err) {
+            console.error(`[RESYNC ERROR] ${phone_number}:`, err.message);
         }
-        
-        console.log(`[RESYNC] Selesai! Berhasil menyisir ${count} pesan.`);
-        res.json({ success: true, processed: count });
-    } catch (err) {
-        console.error('[RESYNC ERROR]:', err);
-        res.status(500).json({ error: err.message });
-    }
+    });
 });
 
 app.post('/api/wa/delete-chats', async (req, res) => {
