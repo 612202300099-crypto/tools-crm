@@ -472,21 +472,29 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
 
         if (message.hasMedia) {
             if (!isFromMe) {
-                // [DISK GUARD] Jangan download media jika disk kritis (>92%)
-                // Cooldown 5 menit agar cleanup tidak dipanggil setiap pesan → mencegah log spam
+                // [DISK GUARD v2] Cek apakah media bisa diterima
+                // Logika baru: Jika Object Storage AKTIF → SELALU terima media (foto ke cloud, bukan disk)
+                //              Jika Object Storage MATI (fallback disk) → cek disk usage
                 let diskOk = true;
                 try {
-                    const { execSync } = require('child_process');
-                    const pct = parseInt(execSync("df / --output=pcent | tail -1").toString().trim(), 10);
-                    if (pct >= 96) {
-                        console.error(`[DISK-GUARD] 🚨 Disk ${pct}%! Media dari ${customerPhoneNumber} DITOLAK sementara.`);
-                        diskOk = false;
-                        // Cleanup dengan cooldown 5 menit (cegah spam)
-                        const now = Date.now();
-                        if (!global._lastDiskCleanupTime || (now - global._lastDiskCleanupTime) > 5 * 60 * 1000) {
-                            global._lastDiskCleanupTime = now;
-                            console.log('[DISK-GUARD] 🧹 Memicu cleanup darurat (cooldown 5 menit)...');
-                            cleanupService(true).catch(() => {});
+                    const objStorageActive = await objectStorage.isObjectStorageAvailable();
+                    if (objStorageActive) {
+                        // Object Storage aktif → foto ke cloud, disk tidak relevan
+                        diskOk = true;
+                    } else {
+                        // Fallback ke disk → cek disk usage
+                        const { execSync } = require('child_process');
+                        const pct = parseInt(execSync("df / --output=pcent | tail -1").toString().trim(), 10);
+                        if (pct >= 96) {
+                            console.error(`[DISK-GUARD] 🚨 Disk ${pct}%! Object Storage MATI & disk penuh — Media dari ${customerPhoneNumber} DITOLAK sementara.`);
+                            diskOk = false;
+                            // Cleanup dengan cooldown 5 menit (cegah spam)
+                            const now = Date.now();
+                            if (!global._lastDiskCleanupTime || (now - global._lastDiskCleanupTime) > 5 * 60 * 1000) {
+                                global._lastDiskCleanupTime = now;
+                                console.log('[DISK-GUARD] 🧹 Memicu cleanup darurat (cooldown 5 menit)...');
+                                cleanupService(true).catch(() => {});
+                            }
                         }
                     }
                 } catch (e) { /* df tidak tersedia di Windows dev, skip */ }
