@@ -298,7 +298,10 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         if (message.from === 'status@broadcast' || message.isStatus) {
              return;
         }
-        if (message.type === 'e2e_notification' || message.type === 'call_log' || message.type === 'protocol' || message.type === 'broadcast_list') {
+        // [SHIELD LEVEL 2b] Blokir tipe pesan yang tidak relevan
+        // 'unknown' = metadata LID/reaction internal WA, tidak perlu diproses
+        const BLOCKED_TYPES = ['e2e_notification', 'call_log', 'protocol', 'broadcast_list', 'unknown'];
+        if (BLOCKED_TYPES.includes(message.type)) {
              return;
         }
 
@@ -466,18 +469,22 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
 
         if (message.hasMedia) {
             if (!isFromMe) {
-                // [DISK GUARD] Jangan download media jika disk kritis (>90%)
-                // Mencegah VPS penuh total yang menyebabkan crash server
+                // [DISK GUARD] Jangan download media jika disk kritis (>92%)
+                // Cooldown 5 menit agar cleanup tidak dipanggil setiap pesan → mencegah log spam
                 let diskOk = true;
                 try {
                     const { execSync } = require('child_process');
                     const pct = parseInt(execSync("df / --output=pcent | tail -1").toString().trim(), 10);
                     if (pct >= 92) {
-                        console.error(`[DISK-GUARD] 🚨 Disk ${pct}%! Media dari ${customerPhoneNumber} DITOLAK sementara untuk mencegah crash.`);
+                        console.error(`[DISK-GUARD] 🚨 Disk ${pct}%! Media dari ${customerPhoneNumber} DITOLAK sementara.`);
                         diskOk = false;
-                        // Trigger cleanup darurat non-blocking
-                        const runCleanup = require('./services/cleanup_service');
-                        runCleanup(true).catch(() => {});
+                        // Cleanup dengan cooldown 5 menit (cegah spam)
+                        const now = Date.now();
+                        if (!global._lastDiskCleanupTime || (now - global._lastDiskCleanupTime) > 5 * 60 * 1000) {
+                            global._lastDiskCleanupTime = now;
+                            console.log('[DISK-GUARD] 🧹 Memicu cleanup darurat (cooldown 5 menit)...');
+                            cleanupService(true).catch(() => {});
+                        }
                     }
                 } catch (e) { /* df tidak tersedia di Windows dev, skip */ }
 

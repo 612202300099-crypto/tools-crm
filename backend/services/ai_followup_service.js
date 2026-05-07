@@ -26,10 +26,13 @@ const fs = require('fs');
 const { lookupOrder, formatOrderDetailMessage } = require('./spreadsheet_service');
 
 // ─── Inisialisasi AI Client (Lazy — dibuat saat pertama kali dipakai) ─────────
-// Ini mencegah crash saat module di-load sebelum dotenv memuat variabel ENV.
 const isUsingGroq = !!process.env.GROQ_API_KEY;
 let _aiClient = null;
 let _aiModel = null;
+
+// [RATE LIMIT GUARD] Simpan waktu kapan AI boleh dipanggil lagi
+// Mencegah spam call ke API saat sudah kena 429 dan membuang token
+let _aiRateLimitUntil = 0;
 
 function getAiClient() {
     if (_aiClient) return { client: _aiClient, model: _aiModel };
@@ -137,23 +140,53 @@ async function getAIReply(conversationHistory, systemPrompt) {
     const ai = getAiClient();
     if (!ai) throw new Error('AI client tidak tersedia — periksa GROQ_API_KEY / OPENAI_API_KEY di .env');
 
+    // [RATE LIMIT GUARD] Cek apakah masih dalam masa cooldown 429
+    if (Date.now() < _aiRateLimitUntil) {
+        const waitSec = Math.ceil((_aiRateLimitUntil - Date.now()) / 1000);
+        console.warn(`[AI-BOT] ⏳ Rate limit aktif — tunggu ${waitSec}s lagi. Pesan diabaikan sementara.`);
+        throw new Error(`RATE_LIMITED: tunggu ${waitSec} detik`);
+    }
+
     const messages = [
         { role: 'system', content: systemPrompt },
         ...conversationHistory,
     ];
-    const completion = await withTimeout(
-        ai.client.chat.completions.create({
-            model: ai.model,
-            messages,
-            max_tokens: 300,
-            temperature: 0.7,
-        }),
-        30000,
-        'AI_Provider_getAIReply'
-    );
-    const reply = completion.choices[0]?.message?.content?.trim();
-    if (!reply) throw new Error('AI returned empty response');
-    return reply;
+
+    try {
+        const completion = await withTimeout(
+            ai.client.chat.completions.create({
+                model: ai.model,
+                messages,
+                max_tokens: 300,
+                temperature: 0.7,
+            }),
+            30000,
+            'AI_Provider_getAIReply'
+        );
+        const reply = completion.choices[0]?.message?.content?.trim();
+        if (!reply) throw new Error('AI returned empty response');
+        return reply;
+    } catch (err) {
+        // [RATE LIMIT HANDLER] Deteksi 429 dan parse retry-after
+        const msg = err.message || '';
+        if (msg.includes('429') || msg.includes('Rate limit') || msg.includes('rate_limit')) {
+            // Coba parse waktu tunggu dari pesan error Groq
+            // Format: "Please try again in 3m44.64s"
+            let waitMs = 5 * 60 * 1000; // Default 5 menit
+            const match = msg.match(/(\d+)m([\d.]+)s/);
+            if (match) {
+                waitMs = (parseInt(match[1]) * 60 + parseFloat(match[2])) * 1000 + 5000; // +5s buffer
+            } else {
+                const secMatch = msg.match(/(\d+\.?\d*)s/);
+                if (secMatch) waitMs = parseFloat(secMatch[1]) * 1000 + 5000;
+            }
+            _aiRateLimitUntil = Date.now() + waitMs;
+            const readableWait = Math.ceil(waitMs / 1000);
+            console.error(`[AI-BOT] 🚫 Groq Rate Limit 429! Bot AI diam selama ${readableWait}s. (Akan aktif kembali otomatis)`);
+            throw new Error(`RATE_LIMITED: tunggu ${readableWait} detik`);
+        }
+        throw err;
+    }
 }
 
 // ─── Kirim Pesan WA dengan Jitter ────────────────────────────────────────────
