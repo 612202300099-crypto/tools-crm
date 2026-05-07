@@ -73,37 +73,42 @@ class MediaQueueService {
         }
 
         this.saveQueue();
-        console.log(`[MEDIA-QUEUE] 📥 Antrian: ${this.queue.length} | Baru: ${messageId.split('_').pop()}`);
-        
-        this.startProcessing();
+        console.log(`[MEDIA-QUEUE] 📥 Antrian: ${this.queue.length} | Worker aktif: ${this.activeWorkers}/${this.concurrency} | Baru: ${messageId.split('_').pop()}`);
+
+        // [BUG FIX] Panggil spawnWorkers langsung (BUKAN startProcessing)
+        // sehingga worker baru bisa di-spawn meskipun sudah ada worker yang jalan.
+        this.spawnWorkers();
     }
 
     /**
-     * Memulai Worker Pool
+     * Spawn worker baru hingga batas concurrency.
+     * Method ini aman dipanggil kapan saja — idempotent.
+     * [FIX] Ini adalah perbaikan dari arsitektur lama yang hanya
+     * memanggil startProcessing() (yang return early jika isProcessing=true).
      */
-    async startProcessing() {
-        if (this.isProcessing || this.queue.length === 0) return;
-        this.isProcessing = true;
+    spawnWorkers() {
+        if (this.queue.length === 0) return;
 
-        console.log(`[MEDIA-QUEUE] 🔥 Mengaktifkan Worker Pool (Target: ${this.concurrency} concurrent)...`);
-        
-        const spawnWorkers = async () => {
-            while (this.activeWorkers < this.concurrency && this.queue.length > 0) {
-                this.activeWorkers++;
-                this.runWorker(this.activeWorkers).finally(() => {
-                    this.activeWorkers--;
-                    // Jika masih ada antrian, panggil lagi
-                    if (this.queue.length > 0) {
-                        spawnWorkers();
-                    } else if (this.activeWorkers === 0) {
-                        this.isProcessing = false;
-                        console.log(`[MEDIA-QUEUE] 🏁 Semua worker selesai. Antrian bersih.`);
-                    }
-                });
+        // Spawn worker baru selama masih di bawah batas concurrency
+        while (this.activeWorkers < this.concurrency && this.queue.length > 0) {
+            this.activeWorkers++;
+            const workerId = this.activeWorkers; // snapshot ID sebelum async
+
+            if (this.activeWorkers === 1) {
+                // Log hanya saat worker pertama spawn (tidak spam)
+                console.log(`[MEDIA-QUEUE] 🔥 Worker Pool aktif. Concurrency: ${this.concurrency}`);
             }
-        };
 
-        spawnWorkers();
+            this.runWorker(workerId).finally(() => {
+                this.activeWorkers--;
+                // Saat worker selesai, coba spawn lagi jika masih ada antrian
+                if (this.queue.length > 0) {
+                    this.spawnWorkers();
+                } else if (this.activeWorkers === 0) {
+                    console.log('[MEDIA-QUEUE] 🏁 Semua worker selesai. Antrian bersih.');
+                }
+            });
+        }
     }
 
     /**
