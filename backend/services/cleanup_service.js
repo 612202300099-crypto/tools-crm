@@ -112,11 +112,12 @@ async function runCleanup(forceTier2 = false) {
         const db = getDb();
 
         // ═══════════════════════════════════════════════════════════
-        // TIER 1: VALIDATED atau SUDAH_KIRIM_FOTO → hapus foto >3 hari
+        // TIER 1: VALIDATED atau SUDAH_KIRIM_FOTO → hapus foto
+        // Normal mode: >3 hari | Crisis mode (disk>90%): >1 hari
         // ═══════════════════════════════════════════════════════════
-        const threeDaysAgo = new Date();
-        threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-        const cutoff3 = threeDaysAgo.toISOString();
+        const tier1Days = (diskBefore >= 90) ? 1 : 3;
+        const tier1Cutoff = new Date();
+        tier1Cutoff.setDate(tier1Cutoff.getDate() - tier1Days);
 
         const tier1Media = db.prepare(`
             SELECT m.id, m.file_name
@@ -124,24 +125,25 @@ async function runCleanup(forceTier2 = false) {
             JOIN customers c ON m.customer_id = c.id
             WHERE c.status IN ('VALIDATED', 'SUDAH_KIRIM_FOTO')
               AND m.created_at < ?
-        `).all(cutoff3);
+        `).all(tier1Cutoff.toISOString());
 
         if (tier1Media.length > 0) {
-            console.log(`[TIER-1] 🗑️ Menghapus ${tier1Media.length} foto dari VALIDATED/SUDAH_KIRIM_FOTO (>3 hari)...`);
+            console.log(`[TIER-1] 🗑️ Menghapus ${tier1Media.length} foto VALIDATED/SUDAH_KIRIM_FOTO (>${tier1Days} hari)...`);
             const { deleted, failed } = deleteMediaRecords(db, tier1Media);
             totalDeleted += deleted;
             totalFailed += failed;
             console.log(`[TIER-1] ✅ ${deleted} dihapus, ${failed} gagal.`);
         } else {
-            console.log(`[TIER-1] ✅ Tidak ada foto expired dari VALIDATED/SUDAH_KIRIM_FOTO.`);
+            console.log(`[TIER-1] ✅ Tidak ada foto expired VALIDATED/SUDAH_KIRIM_FOTO (threshold: ${tier1Days} hari).`);
         }
 
         // ═══════════════════════════════════════════════════════════
-        // TIER 2: BELUM_KIRIM_FOTO abandoned → hapus foto >7 hari
+        // TIER 2: BELUM_KIRIM_FOTO abandoned
+        // Normal mode: >7 hari | Crisis mode (disk>90%): >2 hari
         // ═══════════════════════════════════════════════════════════
-        const sevenDaysAgo = new Date();
-        sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-        const cutoff7 = sevenDaysAgo.toISOString();
+        const tier2Days = (diskBefore >= 90) ? 2 : 7;
+        const tier2Cutoff = new Date();
+        tier2Cutoff.setDate(tier2Cutoff.getDate() - tier2Days);
 
         const tier2Media = db.prepare(`
             SELECT m.id, m.file_name
@@ -149,17 +151,18 @@ async function runCleanup(forceTier2 = false) {
             JOIN customers c ON m.customer_id = c.id
             WHERE c.status = 'BELUM_KIRIM_FOTO'
               AND m.created_at < ?
-        `).all(cutoff7);
+        `).all(tier2Cutoff.toISOString());
 
         if (tier2Media.length > 0) {
-            console.log(`[TIER-2] 🗑️ Menghapus ${tier2Media.length} foto dari customer abandoned (>7 hari)...`);
+            console.log(`[TIER-2] 🗑️ Menghapus ${tier2Media.length} foto customer abandoned (>${tier2Days} hari)...`);
             const { deleted, failed } = deleteMediaRecords(db, tier2Media);
             totalDeleted += deleted;
             totalFailed += failed;
             console.log(`[TIER-2] ✅ ${deleted} dihapus, ${failed} gagal.`);
         } else {
-            console.log(`[TIER-2] ✅ Tidak ada foto abandoned yang perlu dihapus.`);
+            console.log(`[TIER-2] ✅ Tidak ada foto abandoned (threshold: ${tier2Days} hari).`);
         }
+
 
         // ═══════════════════════════════════════════════════════════
         // TIER 3: Folder kosong

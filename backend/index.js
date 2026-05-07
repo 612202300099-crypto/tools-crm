@@ -465,13 +465,27 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         }
 
         if (message.hasMedia) {
-            // [POWERFULL] Pindahkan proses download ke Antrian Latar Belakang (Asynchronous)
-            // Ini membuat AI Bot membalas INSTAN tanpa tertunda proses download foto.
             if (!isFromMe) {
-                console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang (Prioritas: ${isPriority})...`);
-                mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, isPriority);
-                // [UPGRADE] Setelah media masuk, cek kebutuhan foto & kirim konfirmasi otomatis
-                setImmediate(() => checkAndRespondMedia(client, customer, supabase));
+                // [DISK GUARD] Jangan download media jika disk kritis (>90%)
+                // Mencegah VPS penuh total yang menyebabkan crash server
+                let diskOk = true;
+                try {
+                    const { execSync } = require('child_process');
+                    const pct = parseInt(execSync("df / --output=pcent | tail -1").toString().trim(), 10);
+                    if (pct >= 92) {
+                        console.error(`[DISK-GUARD] 🚨 Disk ${pct}%! Media dari ${customerPhoneNumber} DITOLAK sementara untuk mencegah crash.`);
+                        diskOk = false;
+                        // Trigger cleanup darurat non-blocking
+                        const runCleanup = require('./services/cleanup_service');
+                        runCleanup(true).catch(() => {});
+                    }
+                } catch (e) { /* df tidak tersedia di Windows dev, skip */ }
+
+                if (diskOk) {
+                    console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang (Prioritas: ${isPriority})...`);
+                    mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, isPriority);
+                    setImmediate(() => checkAndRespondMedia(client, customer, supabase));
+                }
             } else {
                 console.log(`[DEBUG] ⏭️ Media dari Bot/Admin dideteksi. Abaikan antrian.`);
             }
@@ -506,11 +520,14 @@ client.on('ready', async () => {
     isConnected = true;
     qrCodeData = '';
     
-    stability.start(); // Mulai pemantauan stabilitas
+    stability.start();
     await hydrateContactCache();
 
-    // [STARTUP SYNC] Ambil pesan 48 jam terakhir (diperluas dari 24 jam)
-    // Alasan: Jika server sempat mati semalaman, semua chat tetap terrecovery
+    // [STARTUP SYNC] Ambil pesan 48 jam terakhir
+    // setBusy: Watchdog tidak akan restart selama startup sync berjalan
+    const estimatedSyncMinutes = 15; // Estimasi waktu sync maksimal
+    stability.setBusy(estimatedSyncMinutes * 60 * 1000);
+
     try {
         let chats = [];
         try {
@@ -521,35 +538,43 @@ client.on('ready', async () => {
         }
 
         const targetDate = new Date();
-        targetDate.setDate(targetDate.getDate() - 2); // [FIX] 48 jam (bukan 24 jam)
+        targetDate.setDate(targetDate.getDate() - 2); // 48 jam
         const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
-        console.log(`[SYNC] 🕐 Menyinkronkan pesan sejak: ${targetDate.toLocaleString('id-ID')}`);
+        console.log(`[SYNC] 🕐 Menyinkronkan pesan sejak: ${targetDate.toLocaleString('id-ID')} | Total chat: ${chats.length}`);
 
         let processedCount = 0;
+        let skippedCount = 0;
         let errorCount = 0;
 
         for (const chat of chats) {
-            // [SHIELD] Abaikan status, grup, dan chat kosong
             if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
 
             try {
-                // Jeda 1.5 detik agar tidak memicu proteksi internal WhatsApp/Puppeteer
-                await sleep(1500);
+                // [FIX] Kurangi delay dari 1500ms → 500ms (3x lebih cepat)
+                // Tetap ada jeda kecil agar tidak memicu rate-limit WA
+                await sleep(500);
 
-                // Cek pesan terakhir sebelum fetch (Optimasi: Jika pesan terakhir sudah lama, skip)
+                // Skip chat yang pesan terakhirnya sudah lama
                 if (chat.lastMessage && chat.lastMessage.timestamp < limitTimestamp) {
+                    skippedCount++;
                     continue;
                 }
 
-                // FETCH MESSAGES dengan proteksi error waitForChatLoading
-                const historyMessages = await withTimeout(chat.fetchMessages({ limit: 50 }), 30000, 'fetchMessages_startup')
-                    .catch(err => {
-                        if (err.message.includes('waitForChatLoading') || err.message.includes('undefined')) {
-                            console.log(`ℹ️ Skip chat ${chat.id.user}: WhatsApp Web belum siap (waitForChatLoading).`);
-                            return [];
-                        }
-                        throw err;
-                    });
+                // [FIX] Timeout 45s (dari 30s) — beberapa chat lambat load
+                // Tangkap semua jenis error timeout dengan graceful skip
+                let historyMessages = [];
+                try {
+                    historyMessages = await withTimeout(
+                        chat.fetchMessages({ limit: 50 }),
+                        45000,
+                        'fetchMessages_startup'
+                    );
+                } catch (fetchErr) {
+                    // Skip chat ini, tapi jangan gagalkan seluruh sync
+                    console.warn(`[SYNC] ⚠️ Skip chat ${chat.id.user}: ${fetchErr.message.substring(0, 60)}`);
+                    errorCount++;
+                    continue;
+                }
 
                 for (const msg of historyMessages) {
                     if (msg.timestamp >= limitTimestamp) {
@@ -562,11 +587,12 @@ client.on('ready', async () => {
                 console.error(`⚠️ Gagal menyisir chat ${chat.id.user}:`, chatErr.message);
             }
         }
-        console.log(`✅ Selesai menyisir ${processedCount} pesan tertinggal. (Gagal: ${errorCount} chat)`);
+        console.log(`✅ [SYNC] Selesai! Diproses: ${processedCount} pesan | Dilewati: ${skippedCount} chat lama | Error: ${errorCount} chat`);
     } catch (e) {
-         console.error('⚠️ Gagal total sinkronisasi pesan offline:', e.message);
+        console.error('⚠️ Gagal total sinkronisasi pesan offline:', e.message);
     }
 });
+
 
 client.on('disconnected', async (reason) => {
     console.log(`[WA] ⚠️ WhatsApp Client disconnected: ${reason}`);
