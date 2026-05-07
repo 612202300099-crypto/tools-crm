@@ -1083,11 +1083,27 @@ io.on('connection', (socket) => {
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Backend WA Engine & API running on port ${PORT}`);
-    
-    // THE JANITOR: Menjalankan skrip bersih-bersih tepat setiap Pukul 02:00 Pagi.
+
+    // ── THE JANITOR: Cleanup rutin setiap jam 02:00 pagi ──────────────────
     cron.schedule('0 2 * * *', () => {
-        cleanupService();
+        console.log('[CRON] 🕐 Menjalankan cleanup rutin jam 02:00...');
+        cleanupService(false).catch(e => console.error('[CRON] Cleanup error:', e.message));
     });
-    console.log('🧹 The Janitor (Auto-Cleanup) dijadwalkan setiap jam 02:00 pagi.');
+    console.log('🧹 The Janitor dijadwalkan: cleanup rutin jam 02:00 pagi.');
+
+    // ── DISK MONITOR: Cek setiap 1 jam, darurat jika >90% ─────────────────
+    cron.schedule('0 * * * *', () => {
+        try {
+            const { execSync } = require('child_process');
+            const pct = parseInt(execSync("df / --output=pcent | tail -1").toString().trim(), 10);
+            if (pct >= 90) {
+                console.error(`[DISK-MONITOR] 🚨 Disk ${pct}%! Cleanup darurat dijalankan...`);
+                cleanupService(true).catch(e => console.error('[DISK-MONITOR] Cleanup error:', e.message));
+            } else if (pct >= 80) {
+                console.warn(`[DISK-MONITOR] ⚠️ Disk ${pct}% — mendekati batas aman.`);
+            }
+        } catch (e) { /* silent — df mungkin tidak tersedia */ }
+    });
+    console.log('💾 Disk Monitor aktif: cek tiap jam, cleanup darurat otomatis jika >90%.');
 });
 
