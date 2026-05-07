@@ -1121,6 +1121,50 @@ app.post('/api/ai/config/image', uploadAiImage.single('image'), async (req, res)
     }
 });
 
+// ── API: Media Proxy ────────────────────────────────────────────────────────
+// Proxy gambar melalui backend agar frontend tidak kena CORS
+// saat download ZIP dari Object Storage domain yang berbeda.
+// GET /api/media/proxy/:mediaId
+app.get('/api/media/proxy/:mediaId', async (req, res) => {
+    try {
+        const { mediaId } = req.params;
+        const { data: media } = await supabase
+            .from('media')
+            .select('file_url, file_name, storage_type')
+            .eq('id', mediaId)
+            .single();
+
+        if (!media) return res.status(404).json({ error: 'Media tidak ditemukan' });
+
+        // Jika file lokal, langsung kirim dari disk
+        if (media.storage_type === 'local' || !media.storage_type) {
+            const filePath = path.join(__dirname, 'uploads', media.file_name);
+            if (fs.existsSync(filePath)) {
+                return res.sendFile(filePath);
+            }
+        }
+
+        // Jika object storage, fetch dan stream ke client
+        const response = await fetch(media.file_url);
+        if (!response.ok) {
+            return res.status(502).json({ error: 'Gagal mengambil file dari storage' });
+        }
+
+        // Forward content type
+        const contentType = response.headers.get('content-type') || 'image/jpeg';
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Cache-Control', 'public, max-age=86400'); // Cache 24 jam
+
+        // Stream response body ke client
+        const buffer = await response.arrayBuffer();
+        res.send(Buffer.from(buffer));
+
+    } catch (err) {
+        console.error('[MEDIA-PROXY] Error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ── API: Pending Order Stats ───────────────────────────────────────────────
 // GET /api/pending-orders/stats — Monitor berapa order yang masih antri
 app.get('/api/pending-orders/stats', (req, res) => {

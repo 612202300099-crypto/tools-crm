@@ -301,7 +301,10 @@ export default function ChatDetail() {
       let count = 0;
       
       for (const item of selectedItems) {
-        const res = await fetch(item.file_url);
+        // [FIX] Gunakan proxy backend agar tidak kena CORS dari Object Storage
+        const proxyUrl = `${WA_API_URL}/api/media/proxy/${item.id}`;
+        const res = await fetch(proxyUrl);
+        if (!res.ok) throw new Error(`Gagal download foto ${count + 1}`);
         const blob = await res.blob();
         const ext = item.file_url.split('.').pop() || 'jpg';
         zip.file(`foto_${++count}.${ext}`, blob);
@@ -314,7 +317,7 @@ export default function ChatDetail() {
       
     } catch (error) {
       console.error(error);
-      alert("Gagal mendownload dan memproses file ZIP. Pastikan gambar di Supabase Storage dapat diakses secara publik.");
+      alert("Gagal mendownload dan memproses file ZIP. Coba refresh halaman dan ulangi.");
     } finally {
       setLoadingMedia(false);
     }
