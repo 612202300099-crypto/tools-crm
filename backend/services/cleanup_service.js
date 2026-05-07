@@ -1,78 +1,75 @@
 /**
- * Cleanup Service (The Janitor) — v2
+ * Cleanup Service (The Janitor) — v3
  * ─────────────────────────────────────────────────────────────
- * Strategi penghapusan bertingkat untuk menjaga disk VPS tetap sehat:
+ * Menggunakan raw SQLite query (better-sqlite3) langsung —
+ * BUKAN supabase_shim — karena shim tidak support complex chaining
+ * seperti .in().lt() yang dibutuhkan di sini.
  *
- * TIER 1 — Agresif (Hapus segera):
- *   - File foto dari customer VALIDATED yang lebih dari 3 hari
- *   - File foto dari customer SUDAH_KIRIM_FOTO yang lebih dari 3 hari
+ * TIER 1 — Hapus setelah 3 hari:
+ *   - Foto dari customer berstatus VALIDATED
+ *   - Foto dari customer berstatus SUDAH_KIRIM_FOTO
  *
- * TIER 2 — Aman (Hapus setelah 7 hari):
- *   - File foto dari customer BELUM_KIRIM_FOTO yang lebih dari 7 hari
- *     (kemungkinan besar customer abandonded / tidak jadi order)
+ * TIER 2 — Hapus setelah 7 hari (abandoned):
+ *   - Foto dari customer BELUM_KIRIM_FOTO yang sudah >7 hari tidak aktif
  *
- * TIER 3 — Folder kosong (cleanup sisa):
- *   - Hapus folder uploads/{customer_id} yang sudah kosong
+ * TIER 3 — Folder kosong:
+ *   - Hapus folder uploads/{id} yang sudah tidak punya file
  *
- * DISK MONITOR — Alert:
- *   - Jika disk > 85% → log WARNING
- *   - Jika disk > 95% → log CRITICAL + paksa cleanup Tier 1+2
+ * DISK MONITOR:
+ *   - Cek disk sebelum & sesudah cleanup
+ *   - Log WARNING jika >80%, KRITIS jika >90%
  */
 
-require('dotenv').config();
-const { createClient } = require('../supabase_shim');
-const fs = require('fs');
 const path = require('path');
+const fs = require('fs');
 const { execSync } = require('child_process');
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 
-// ─── Helper: Cek penggunaan disk saat ini ────────────────────────────────────
+// ─── Lazy-load db agar tidak crash jika dipanggil sebelum dotenv ─────────────
+function getDb() {
+    return require('../db');
+}
+
+// ─── Disk Usage ───────────────────────────────────────────────────────────────
 function getDiskUsagePercent() {
     try {
-        // Baca dari /proc/mounts atau gunakan df
-        const output = execSync("df / --output=pcent | tail -1").toString().trim();
-        return parseInt(output.replace('%', ''), 10);
+        const out = execSync("df / --output=pcent | tail -1").toString().trim();
+        return parseInt(out.replace('%', ''), 10) || 0;
     } catch (e) {
-        return 0; // Jika gagal baca, anggap aman
+        return 0;
     }
 }
 
-// ─── Helper: Hapus file + record DB ──────────────────────────────────────────
-async function deleteMediaRecords(mediaList) {
-    let deletedFiles = 0;
-    let failedFiles = 0;
-    const idsToDelete = [];
+// ─── Hapus file fisik + hapus record DB ──────────────────────────────────────
+function deleteMediaRecords(db, mediaList) {
+    let deleted = 0;
+    let failed = 0;
+
+    const deleteStmt = db.prepare('DELETE FROM media WHERE id = ?');
 
     for (const media of mediaList) {
-        // Konstruksi path: uploads/customer_id/filename atau uploads/filename
-        const filePath = path.join(UPLOADS_DIR, media.file_name);
-
         try {
-            if (fs.existsSync(filePath)) {
-                fs.unlinkSync(filePath);
-                deletedFiles++;
-            } else {
-                // File sudah tidak ada di disk, tapi record DB masih ada → hapus DB saja
-                deletedFiles++;
+            // Hapus file fisik
+            if (media.file_name) {
+                const filePath = path.join(UPLOADS_DIR, media.file_name);
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
             }
-            idsToDelete.push(media.id);
+            // Hapus record DB
+            deleteStmt.run(media.id);
+            deleted++;
         } catch (err) {
-            console.error(`  ⚠️ Gagal hapus ${media.file_name}: ${err.message}`);
-            failedFiles++;
+            console.error(`  ⚠️ Gagal hapus ${media.file_name || media.id}: ${err.message}`);
+            failed++;
         }
     }
 
-    // Hapus batch dari database
-    if (idsToDelete.length > 0) {
-        await supabase.from('media').delete().in('id', idsToDelete);
-    }
-
-    return { deletedFiles, failedFiles };
+    return { deleted, failed };
 }
 
-// ─── Helper: Hapus folder kosong di uploads/ ─────────────────────────────────
+// ─── Hapus folder kosong di uploads/ ─────────────────────────────────────────
 function cleanEmptyFolders() {
     if (!fs.existsSync(UPLOADS_DIR)) return 0;
     let removed = 0;
@@ -91,95 +88,82 @@ function cleanEmptyFolders() {
     return removed;
 }
 
-// ─── Fungsi Utama ─────────────────────────────────────────────────────────────
+// ─── FUNGSI UTAMA ─────────────────────────────────────────────────────────────
 async function runCleanup(forceTier2 = false) {
     const startTime = Date.now();
-    console.log(`\n[${new Date().toISOString()}] 🧹 The Janitor v2 mulai bekerja...`);
+    console.log(`\n[${new Date().toISOString()}] 🧹 The Janitor v3 mulai bekerja...`);
 
-    // ── Cek kondisi disk dulu ──
-    const diskPercent = getDiskUsagePercent();
-    console.log(`[DISK] 💾 Penggunaan disk: ${diskPercent}%`);
+    const diskBefore = getDiskUsagePercent();
+    console.log(`[DISK] 💾 Penggunaan disk: ${diskBefore}%`);
 
-    if (diskPercent >= 95) {
-        console.error(`[DISK] 🚨 KRITIS! Disk ${diskPercent}% — Cleanup darurat diaktifkan!`);
-        forceTier2 = true; // Paksa hapus semua tier
-    } else if (diskPercent >= 85) {
-        console.warn(`[DISK] ⚠️ WARNING: Disk ${diskPercent}% — Mendekati batas aman.`);
+    if (diskBefore >= 95) {
+        console.error(`[DISK] 🚨 KRITIS! Disk ${diskBefore}% — Cleanup darurat diaktifkan!`);
+        forceTier2 = true;
+    } else if (diskBefore >= 80) {
+        console.warn(`[DISK] ⚠️ WARNING: Disk ${diskBefore}% — Mendekati batas aman.`);
     } else {
-        console.log(`[DISK] ✅ Disk ${diskPercent}% — Dalam batas aman.`);
+        console.log(`[DISK] ✅ Disk dalam batas aman.`);
     }
 
     let totalDeleted = 0;
     let totalFailed = 0;
 
     try {
-        // ═══════════════════════════════════════════════════════
-        // TIER 1: Customer VALIDATED atau SUDAH_KIRIM_FOTO > 3 hari
-        // ═══════════════════════════════════════════════════════
+        const db = getDb();
+
+        // ═══════════════════════════════════════════════════════════
+        // TIER 1: VALIDATED atau SUDAH_KIRIM_FOTO → hapus foto >3 hari
+        // ═══════════════════════════════════════════════════════════
         const threeDaysAgo = new Date();
         threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+        const cutoff3 = threeDaysAgo.toISOString();
 
-        const { data: tier1Customers } = await supabase
-            .from('customers')
-            .select('id')
-            .in('status', ['VALIDATED', 'SUDAH_KIRIM_FOTO']);
+        const tier1Media = db.prepare(`
+            SELECT m.id, m.file_name
+            FROM media m
+            JOIN customers c ON m.customer_id = c.id
+            WHERE c.status IN ('VALIDATED', 'SUDAH_KIRIM_FOTO')
+              AND m.created_at < ?
+        `).all(cutoff3);
 
-        if (tier1Customers && tier1Customers.length > 0) {
-            const ids = tier1Customers.map(c => c.id);
-
-            const { data: tier1Media } = await supabase
-                .from('media')
-                .select('id, file_name, created_at')
-                .in('customer_id', ids)
-                .lt('created_at', threeDaysAgo.toISOString());
-
-            if (tier1Media && tier1Media.length > 0) {
-                console.log(`[TIER-1] 🗑️ Menghapus ${tier1Media.length} foto dari VALIDATED/SUDAH_KIRIM_FOTO (>3 hari)...`);
-                const { deletedFiles, failedFiles } = await deleteMediaRecords(tier1Media);
-                totalDeleted += deletedFiles;
-                totalFailed += failedFiles;
-                console.log(`[TIER-1] ✅ Selesai: ${deletedFiles} dihapus, ${failedFiles} gagal.`);
-            } else {
-                console.log(`[TIER-1] ✅ Tidak ada foto VALIDATED/SUDAH yang expired.`);
-            }
+        if (tier1Media.length > 0) {
+            console.log(`[TIER-1] 🗑️ Menghapus ${tier1Media.length} foto dari VALIDATED/SUDAH_KIRIM_FOTO (>3 hari)...`);
+            const { deleted, failed } = deleteMediaRecords(db, tier1Media);
+            totalDeleted += deleted;
+            totalFailed += failed;
+            console.log(`[TIER-1] ✅ ${deleted} dihapus, ${failed} gagal.`);
+        } else {
+            console.log(`[TIER-1] ✅ Tidak ada foto expired dari VALIDATED/SUDAH_KIRIM_FOTO.`);
         }
 
-        // ═══════════════════════════════════════════════════════
-        // TIER 2: Customer BELUM_KIRIM_FOTO > 7 hari (abandoned)
-        // Hanya dijalankan jika forceTier2 = true (disk kritis) atau default
-        // ═══════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════
+        // TIER 2: BELUM_KIRIM_FOTO abandoned → hapus foto >7 hari
+        // ═══════════════════════════════════════════════════════════
         const sevenDaysAgo = new Date();
         sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+        const cutoff7 = sevenDaysAgo.toISOString();
 
-        const { data: tier2Customers } = await supabase
-            .from('customers')
-            .select('id')
-            .eq('status', 'BELUM_KIRIM_FOTO')
-            .lt('created_at', sevenDaysAgo.toISOString()); // Customer yang sudah > 7 hari tanpa update
+        const tier2Media = db.prepare(`
+            SELECT m.id, m.file_name
+            FROM media m
+            JOIN customers c ON m.customer_id = c.id
+            WHERE c.status = 'BELUM_KIRIM_FOTO'
+              AND m.created_at < ?
+        `).all(cutoff7);
 
-        if (tier2Customers && tier2Customers.length > 0) {
-            const ids = tier2Customers.map(c => c.id);
-
-            const { data: tier2Media } = await supabase
-                .from('media')
-                .select('id, file_name, created_at')
-                .in('customer_id', ids)
-                .lt('created_at', sevenDaysAgo.toISOString());
-
-            if (tier2Media && tier2Media.length > 0) {
-                console.log(`[TIER-2] 🗑️ Menghapus ${tier2Media.length} foto dari customer abandoned (>7 hari)...`);
-                const { deletedFiles, failedFiles } = await deleteMediaRecords(tier2Media);
-                totalDeleted += deletedFiles;
-                totalFailed += failedFiles;
-                console.log(`[TIER-2] ✅ Selesai: ${deletedFiles} dihapus, ${failedFiles} gagal.`);
-            } else {
-                console.log(`[TIER-2] ✅ Tidak ada foto abandoned yang perlu dihapus.`);
-            }
+        if (tier2Media.length > 0) {
+            console.log(`[TIER-2] 🗑️ Menghapus ${tier2Media.length} foto dari customer abandoned (>7 hari)...`);
+            const { deleted, failed } = deleteMediaRecords(db, tier2Media);
+            totalDeleted += deleted;
+            totalFailed += failed;
+            console.log(`[TIER-2] ✅ ${deleted} dihapus, ${failed} gagal.`);
+        } else {
+            console.log(`[TIER-2] ✅ Tidak ada foto abandoned yang perlu dihapus.`);
         }
 
-        // ═══════════════════════════════════════════════════════
-        // TIER 3: Bersihkan folder kosong
-        // ═══════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════
+        // TIER 3: Folder kosong
+        // ═══════════════════════════════════════════════════════════
         const removedFolders = cleanEmptyFolders();
         if (removedFolders > 0) {
             console.log(`[TIER-3] 🗂️ Menghapus ${removedFolders} folder uploads kosong.`);
@@ -187,18 +171,24 @@ async function runCleanup(forceTier2 = false) {
 
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         const diskAfter = getDiskUsagePercent();
-        console.log(`\n✅ The Janitor Selesai dalam ${elapsed}s.`);
-        console.log(`   Total dihapus: ${totalDeleted} file | Gagal: ${totalFailed}`);
-        console.log(`   Disk sekarang: ${diskAfter}% (sebelumnya: ${diskPercent}%)\n`);
+
+        console.log(`\n✅ The Janitor v3 selesai dalam ${elapsed}s.`);
+        console.log(`   Dihapus: ${totalDeleted} file | Gagal: ${totalFailed}`);
+        console.log(`   Disk: ${diskBefore}% → ${diskAfter}%\n`);
 
     } catch (err) {
         console.error('❌ Terjadi kesalahan di The Janitor:', err.message);
+        console.error(err.stack);
     }
 }
 
-// Untuk dijalankan langsung: node cleanup_service.js
+// Jalankan langsung via CLI: node cleanup_service.js
 if (require.main === module) {
-    runCleanup(true) // force tier 2 jika dijalankan manual
+    // Muat env dulu sebelum apapun
+    require('dotenv').config({ path: path.join(__dirname, '../../.env') });
+    require('dotenv').config({ path: path.join(__dirname, '../.env') });
+
+    runCleanup(true)
         .then(() => process.exit(0))
         .catch(e => { console.error(e); process.exit(1); });
 } else {
