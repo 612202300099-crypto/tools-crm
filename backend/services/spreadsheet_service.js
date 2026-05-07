@@ -7,6 +7,7 @@
  *
  * Best Practice:
  * - In-memory cache per order_id (TTL 15 menit) → hemat API quota
+ * - bypassCache=true → untuk pending order retry (data selalu fresh)
  * - Fail-safe per toko (error 1 toko tidak menghentikan pencarian)
  * - Offset kolom berbeda per toko ditangani secara deklaratif
  * - Deteksi produk Polaroid otomatis dari nama produk / SKU
@@ -67,7 +68,7 @@ function getCol(row, colKey, offset) {
 // ─── Helper: Deteksi apakah produk adalah Polaroid ──────────────────────────────
 function isPolaroidProduct(productName, sku) {
     const nameUpper = (productName || '').toUpperCase();
-    const skuUpper = (sku || '').toUpperCase();
+    const skuUpper  = (sku || '').toUpperCase();
     return nameUpper.includes('POLAROID') || skuUpper.includes('POLAROID');
 }
 
@@ -85,7 +86,7 @@ function extractPolaroidPcs(productName, sku, variation) {
 async function fetchSheetData(spreadsheetId, sheetName, apiKey) {
     // [BEST PRACTICE] Ambil A:N (14 kolom) untuk mengakomodasi Variation di kolom K-M
     const range = encodeURIComponent(`${sheetName}!A:N`);
-    const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?key=${apiKey}`;
+    const url   = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?key=${apiKey}`;
 
     const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
 
@@ -100,7 +101,7 @@ async function fetchSheetData(spreadsheetId, sheetName, apiKey) {
 
 // ─── Fungsi Utama: Cari nomor pesanan di satu toko ───────────────────────────────
 async function lookupInStore(store, orderId, apiKey) {
-    const rows = await fetchSheetData(store.spreadsheetId, store.sheetName, apiKey);
+    const rows   = await fetchSheetData(store.spreadsheetId, store.sheetName, apiKey);
     const offset = store.colOffset;
 
     // Lewati baris header (mulai dari dataStartRow - 1 karena 0-indexed)
@@ -115,8 +116,9 @@ async function lookupInStore(store, orderId, apiKey) {
     if (matchedRows.length === 0) return null;
 
     // Cek status dari baris pertama yang cocok
-    const statusRaw = getCol(matchedRows[0], 'STATUS', offset);
-    const isCancelled = statusRaw.toLowerCase().includes('batal') || statusRaw.toLowerCase().includes('cancel');
+    const statusRaw   = getCol(matchedRows[0], 'STATUS', offset);
+    const isCancelled = statusRaw.toLowerCase().includes('batal') ||
+                        statusRaw.toLowerCase().includes('cancel');
 
     if (isCancelled) {
         return {
@@ -131,11 +133,11 @@ async function lookupInStore(store, orderId, apiKey) {
 
     // Parse semua item pesanan
     const items = matchedRows.map(row => {
-        const sku = getCol(row, 'SKU', offset);
+        const sku         = getCol(row, 'SKU', offset);
         const productName = getCol(row, 'PRODUCT', offset);
-        const qty = parseInt(getCol(row, 'QUANTITY', offset), 10) || 1;
-        const variation = (row[COL.SKU + offset + 1] || '').toString().trim(); // Kolom Variation (K untuk Ventura)
-        const isPolaroid = isPolaroidProduct(productName, sku);
+        const qty         = parseInt(getCol(row, 'QUANTITY', offset), 10) || 1;
+        const variation   = (row[COL.SKU + offset + 1] || '').toString().trim(); // Kolom Variation (K untuk Ventura)
+        const isPolaroid  = isPolaroidProduct(productName, sku);
         const polaroidPcs = isPolaroid ? extractPolaroidPcs(productName, sku, variation) : 0;
 
         return {
@@ -152,7 +154,7 @@ async function lookupInStore(store, orderId, apiKey) {
 
     // Total foto yang dibutuhkan (hanya dari item Polaroid)
     const totalPhotosNeeded = items.reduce((sum, item) => sum + item.photosNeeded, 0);
-    const hasPolaroid = items.some(item => item.isPolaroid);
+    const hasPolaroid       = items.some(item => item.isPolaroid);
 
     return {
         found: true,
@@ -169,23 +171,38 @@ async function lookupInStore(store, orderId, apiKey) {
 // ─── EXPORT: Fungsi Publik Utama ─────────────────────────────────────────────────
 /**
  * Cari nomor pesanan di seluruh 3 toko.
- * Return: { found, cancelled, store, storeName, status, items, totalPhotosNeeded, hasPolaroid }
- * atau null jika tidak ditemukan di mana pun.
+ *
+ * @param {string} orderId
+ * @param {object} [options]
+ * @param {boolean} [options.bypassCache=false]
+ *   Paksa fetch ulang dari Sheets, lewati cache 15 menit.
+ *   WAJIB true saat dipanggil dari pending_order_service (retry)
+ *   agar selalu mendapat data terbaru jika tim sudah update spreadsheet.
+ *
+ * @returns {{ found, cancelled, store, storeName, status, items,
+ *             totalPhotosNeeded, hasPolaroid } | null}
  */
-async function lookupOrder(orderId) {
+async function lookupOrder(orderId, { bypassCache = false } = {}) {
     const apiKey = process.env.GOOGLE_SHEETS_API_KEY;
+
     // Guard: belum diisi atau masih placeholder
     if (!apiKey || apiKey.includes('ISI_API_KEY')) {
         console.warn('[SHEET] ⚠️ GOOGLE_SHEETS_API_KEY belum diisi di .env. Fitur cek spreadsheet dinonaktifkan.');
         return null;
     }
 
-    // Cek cache terlebih dahulu
     const cacheKey = orderId.toString();
-    const cached = orderCache.get(cacheKey);
-    if (cached && (Date.now() - cached.timestamp) < CACHE_TTL_MS) {
-        console.log(`[SHEET] 📦 Cache hit untuk order ${orderId}`);
-        return cached.result;
+
+    // Cek cache — skip jika bypassCache=true (pending order retry selalu fresh)
+    if (!bypassCache) {
+        const cached = orderCache.get(cacheKey);
+        if (cached && (Date.now() - cached.timestamp) < CACHE_TTL_MS) {
+            console.log(`[SHEET] 📦 Cache hit untuk order ${orderId}`);
+            return cached.result;
+        }
+    } else {
+        console.log(`[SHEET] 🔄 Bypass cache untuk order ${orderId} (pending retry — ambil data terbaru)`);
+        orderCache.delete(cacheKey); // Hapus cache lama agar hasil baru tersimpan
     }
 
     console.log(`[SHEET] 🔍 Mencari nomor pesanan ${orderId} di 3 spreadsheet...`);
@@ -200,10 +217,10 @@ async function lookupOrder(orderId) {
     );
 
     const results = await Promise.all(promises);
-    const found = results.find(r => r !== null && r.found === true);
-    const result = found || null;
+    const found   = results.find(r => r !== null && r.found === true);
+    const result  = found || null;
 
-    // Simpan ke cache (termasuk null = tidak ditemukan)
+    // Simpan ke cache (termasuk null = tidak ditemukan — berlaku juga 15 menit)
     orderCache.set(cacheKey, { result, timestamp: Date.now() });
 
     if (result) {

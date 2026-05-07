@@ -34,15 +34,32 @@ db.exec(`
     );
 
     CREATE TABLE IF NOT EXISTS media (
-        id TEXT PRIMARY KEY,
-        customer_id TEXT NOT NULL,
-        message_id TEXT,
-        file_url TEXT NOT NULL,
-        file_name TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        id           TEXT PRIMARY KEY,
+        customer_id  TEXT NOT NULL,
+        message_id   TEXT,
+        file_url     TEXT NOT NULL,
+        file_name    TEXT,
+        storage_key  TEXT,  -- Key/path di object storage (sama dengan file_name)
+        storage_type TEXT DEFAULT 'local',  -- 'object' atau 'local'
+        created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
-        FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
+        FOREIGN KEY (message_id)  REFERENCES messages(id)  ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS pending_orders (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id  TEXT    NOT NULL,
+        order_id     TEXT    NOT NULL,
+        phone_number TEXT    NOT NULL,
+        retry_count  INTEGER DEFAULT 0,
+        max_retries  INTEGER DEFAULT 6,
+        last_retry_at TEXT,
+        resolved_at   TEXT,
+        created_at    TEXT DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_orders_active
+        ON pending_orders(order_id)
+        WHERE resolved_at IS NULL;
 
     CREATE TABLE IF NOT EXISTS ai_config (
         id INTEGER PRIMARY KEY,
@@ -79,6 +96,17 @@ if (!existingColumns.includes('photo_confirmed')) {
 if (!existingColumns.includes('photo_followup_count')) {
     db.exec(`ALTER TABLE customers ADD COLUMN photo_followup_count INTEGER DEFAULT 0;`);
     console.log('[DB] ✅ Migration: Kolom photo_followup_count ditambahkan ke tabel customers.');
+}
+
+// ── [MIGRATION] Kolom storage_key & storage_type di tabel media ──────────────
+const mediaColumns = db.prepare('PRAGMA table_info(media)').all().map(c => c.name);
+if (!mediaColumns.includes('storage_key')) {
+    db.exec(`ALTER TABLE media ADD COLUMN storage_key TEXT;`);
+    console.log('[DB] ✅ Migration: Kolom storage_key ditambahkan ke tabel media.');
+}
+if (!mediaColumns.includes('storage_type')) {
+    db.exec(`ALTER TABLE media ADD COLUMN storage_type TEXT DEFAULT 'local';`);
+    console.log('[DB] ✅ Migration: Kolom storage_type ditambahkan ke tabel media.');
 }
 
 module.exports = db;

@@ -10,9 +10,11 @@ const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
-const cleanupService = require('./services/cleanup_service');
-const StabilityManager = require('./services/stability_manager');
-const MediaQueueService = require('./services/media_queue_service');
+const cleanupService     = require('./services/cleanup_service');
+const StabilityManager   = require('./services/stability_manager');
+const MediaQueueService  = require('./services/media_queue_service');
+const objectStorage      = require('./services/object_storage_service');
+const pendingOrderSvc    = require('./services/pending_order_service');
 const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
 const { router: localApiRouter } = require('./api');
@@ -355,12 +357,13 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                 if (dbMsg.is_deleted) return; // Idempotent check
                 console.log(`🗑️ [HISTORY REVOKE] Menjalankan 3-Layer Sinkronisasi pada Hash: ${targetHash}...`);
                 
-                // LAYER 2: Menghapus foto fisik dari VPS lokal (Non-Blocking) & Database Media
-                const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
+                // LAYER 2: Hapus dari Object Storage/Disk (Non-Blocking). LAYER 3: Hapus DB Media
+                const { data: mediaData } = await supabase.from('media').select('id, file_name, storage_key, storage_type').eq('message_id', dbMsg.id);
                 if (mediaData && mediaData.length > 0) {
                     for (const m of mediaData) {
-                        const filePath = path.join(__dirname, 'uploads', m.file_name);
-                        await fs.promises.unlink(filePath).catch(e => { /* silent skip */ });
+                        const storageType = m.storage_type || 'local';
+                        const storageKey  = m.storage_key  || m.file_name;
+                        await objectStorage.deleteMedia(storageKey, storageType).catch(() => {});
                         await supabase.from('media').delete().eq('id', m.id);
                     }
                 }
@@ -530,6 +533,13 @@ client.on('ready', async () => {
     stability.start();
     await hydrateContactCache();
 
+    // [PENDING-ORDER] Inject dependensi ke pending order service
+    pendingOrderSvc.init(client, supabase);
+    console.log('[SYSTEM] 📦 Pending Order Service siap — retry otomatis setiap 5 menit.');
+
+    // [OBJECT-STORAGE] Cek koneksi object storage saat startup
+    objectStorage.healthCheck().catch(() => {});
+
     // [STARTUP SYNC] Ambil pesan 48 jam terakhir
     // setBusy: Watchdog tidak akan restart selama startup sync berjalan
     const estimatedSyncMinutes = 15; // Estimasi waktu sync maksimal
@@ -686,13 +696,14 @@ client.on('message_revoke_everyone', async (after, before) => {
              console.log(`ℹ️ [REVOKE INFO] Tidak dapat memverifikasi pengirim via chat protocol, tapi Hash Unik dikonfirmasi valid.`);
         }
 
-        // LAYER 2: Hapus File VPS Asinkronus Non-Blocking (Poin 2). LAYER 3: Hapus DB Media
-        const { data: mediaData } = await supabase.from('media').select('id, file_name').eq('message_id', dbMsg.id);
+        // LAYER 2: Hapus dari Object Storage/Disk (Non-Blocking). LAYER 3: Hapus DB Media
+        const { data: mediaData } = await supabase.from('media').select('id, file_name, storage_key, storage_type').eq('message_id', dbMsg.id);
         if (mediaData && mediaData.length > 0) {
             for (const m of mediaData) {
-                const filePath = path.join(__dirname, 'uploads', m.file_name);
-                await fs.promises.unlink(filePath).catch(e => {
-                     console.log(`ℹ️ Media fisik ${m.file_name} sudah tidak di memori VPS.`); 
+                const storageType = m.storage_type || 'local';
+                const storageKey  = m.storage_key  || m.file_name;
+                await objectStorage.deleteMedia(storageKey, storageType).catch(e => {
+                    console.log(`ℹ️ Media ${m.file_name} tidak dapat dihapus: ${e.message}`);
                 });
                 await supabase.from('media').delete().eq('id', m.id);
             }
@@ -895,13 +906,17 @@ app.post('/api/wa/delete-chats', async (req, res) => {
 
         for (const customerId of customer_ids) {
              try {
-                 // FASE 1: Isolasi & Pemusnahan File Fisik Hardisk (Zero Leakage)
-                 const folderPath = path.join(__dirname, 'uploads', customerId.toString());
-                 if (fs.existsSync(folderPath)) {
-                      await fs.promises.rm(folderPath, { recursive: true, force: true }).catch(err => {
-                          // Toleransi apabila file memang sedang dikunci sistem operasi
-                          console.error(`⚠️ (Tertahan) Gagal wipe folder fisik ${customerId}:`, err.message);
-                      });
+                 // FASE 1: Hapus media dari Object Storage/Disk (Zero Leakage)
+                 const { data: custMedia } = await supabase
+                     .from('media')
+                     .select('id, file_name, storage_key, storage_type')
+                     .eq('customer_id', customerId);
+                 if (custMedia && custMedia.length > 0) {
+                     for (const m of custMedia) {
+                         const sType = m.storage_type || 'local';
+                         const sKey  = m.storage_key  || m.file_name;
+                         await objectStorage.deleteMedia(sKey, sType).catch(() => {});
+                     }
                  }
 
                  // FASE 2: Evakuasi Tabel Turunan
@@ -999,9 +1014,10 @@ app.post('/api/media/delete-bulk', async (req, res) => {
 
     try {
         // Ambil data media yang akan dihapus (hanya milik customer tersebut)
+        // [FIX] Sertakan storage_key & storage_type agar file terhapus dari tempat yang benar
         const { data: mediaItems, error: fetchErr } = await supabase
             .from('media')
-            .select('id, file_name')
+            .select('id, file_name, storage_key, storage_type')
             .in('id', media_ids)
             .eq('customer_id', customer_id);
 
@@ -1105,6 +1121,17 @@ app.post('/api/ai/config/image', uploadAiImage.single('image'), async (req, res)
     }
 });
 
+// ── API: Pending Order Stats ───────────────────────────────────────────────
+// GET /api/pending-orders/stats — Monitor berapa order yang masih antri
+app.get('/api/pending-orders/stats', (req, res) => {
+    try {
+        const stats = pendingOrderSvc.getPendingStats();
+        res.json({ success: true, ...stats });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 const PORT = process.env.PORT || 3001;
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
@@ -1122,7 +1149,20 @@ server.listen(PORT, '0.0.0.0', () => {
         console.log('[CRON] 🕐 Menjalankan cleanup rutin jam 02:00...');
         cleanupService(false).catch(e => console.error('[CRON] Cleanup error:', e.message));
     });
-    console.log('🧹 The Janitor dijadwalkan: cleanup rutin jam 02:00 pagi.');
+    console.log('🧹 The Janitor v4 dijadwalkan: cleanup rutin jam 02:00 pagi.');
+
+    // ── PENDING ORDER RETRY: Cek setiap 5 menit ────────────────────────────
+    // Jika customer kirim nomor pesanan sebelum tim update spreadsheet,
+    // sistem akan retry otomatis sampai 6x (30 menit total).
+    cron.schedule('*/5 * * * *', async () => {
+        if (!isConnected) return; // Jangan proses jika WA belum konek
+        try {
+            await pendingOrderSvc.processPendingOrders();
+        } catch (e) {
+            console.error('[CRON] Pending order retry error:', e.message);
+        }
+    });
+    console.log('📦 Pending Order Retry aktif: cek setiap 5 menit, max 30 menit per order.');
 
     // ── DISK MONITOR: Cek setiap 1 jam, darurat jika >90% ─────────────────
     cron.schedule('0 * * * *', () => {
@@ -1135,7 +1175,7 @@ server.listen(PORT, '0.0.0.0', () => {
             } else if (pct >= 80) {
                 console.warn(`[DISK-MONITOR] ⚠️ Disk ${pct}% — mendekati batas aman.`);
             }
-        } catch (e) { /* silent — df mungkin tidak tersedia */ }
+        } catch (e) { /* silent — df mungkin tidak tersedia di Windows */ }
     });
     console.log('💾 Disk Monitor aktif: cek tiap jam, cleanup darurat otomatis jika >90%.');
 });

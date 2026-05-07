@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { MessageMedia } = require('whatsapp-web.js');
 const { convertHeicToJpg } = require('../utils/heicConverter');
+const objectStorage = require('./object_storage_service');
 
 // [PERFORMANCE] Lazy-load sharp agar tidak crash jika belum terinstall
 let _sharp = null;
@@ -231,14 +232,18 @@ class MediaQueueService {
             }
 
             const fileName = `${job.customerId}/foto-${uniqueSuffix}.${ext}`;
-            const uploadsDir = path.join(__dirname, '../uploads', job.customerId.toString());
-            
-            if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-            
-            const filePath = path.join(__dirname, '../uploads', fileName);
-            fs.writeFileSync(filePath, buffer);
+            const mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
 
-            const publicUrl = `${this.PUBLIC_API_URL}/uploads/${fileName}`;
+            // [OBJECT STORAGE] Upload ke object storage (S3-compatible)
+            // Jika gagal total setelah 3 retry, otomatis fallback ke disk lokal.
+            // TIDAK ADA FOTO CUSTOMER YANG HILANG.
+            const { url: publicUrl, key: storageKey, storageType } = await objectStorage.uploadMedia(
+                buffer,
+                fileName,
+                mimeType
+            );
+
+            console.log(`[W-${workerId}] ☁️ Tersimpan di ${storageType === 'object' ? 'Object Storage' : 'Disk Lokal'}: ${fileName}`);
 
 
             // 4. Cari Message di DB (Timeout Guard)
@@ -255,11 +260,13 @@ class MediaQueueService {
             // 5. Simpan ke media (Timeout Guard)
             const { error: mediaError } = await this.withTimeout(
                 this.supabase.from('media').insert({
-                    customer_id: job.customerId,
-                    message_id: msgRecord.id,
-                    file_url: publicUrl,
-                    file_name: fileName,
-                    created_at: job.timestamp
+                    customer_id:  job.customerId,
+                    message_id:   msgRecord.id,
+                    file_url:     publicUrl,
+                    file_name:    fileName,
+                    storage_key:  storageKey,
+                    storage_type: storageType,
+                    created_at:   job.timestamp
                 }),
                 this.dbTimeout, 'insertMediaDB'
             );

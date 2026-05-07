@@ -8,14 +8,14 @@
  *
  * 2. Customer kirim nomor pesanan (14-20 digit)
  *    → Lookup di 3 spreadsheet (Ventura, Giftyours, Custombase)
- *    → Jika TIDAK DITEMUKAN → beritahu customer
+ *    → Jika TIDAK DITEMUKAN → masuk Pending Queue (retry otomatis 5 menit)
  *    → Jika DIBATALKAN → beritahu customer
  *    → Jika DITEMUKAN → simpan ke DB + kirim detail + minta foto
  *
  * 3. Customer kirim foto (media)
  *    → Hitung media yang masuk di DB
  *    → Jika Polaroid & kurang → tagih sisa foto (maks 3x)
- *    → Jika sudah >3x tagiha → tanya konfirmasi (proses/belum)
+ *    → Jika sudah >3x tagihan → tanya konfirmasi (proses/belum)
  *    → Jika non-Polaroid → tanya konfirmasi langsung
  *    → Jika sudah cukup / konfirmasi → update status → selesai
  */
@@ -24,6 +24,7 @@ const OpenAI = require('openai');
 const path = require('path');
 const fs = require('fs');
 const { lookupOrder, formatOrderDetailMessage } = require('./spreadsheet_service');
+const pendingOrderService = require('./pending_order_service');
 
 // ─── Inisialisasi AI Client (Lazy — dibuat saat pertama kali dipakai) ─────────
 const isUsingGroq = !!process.env.GROQ_API_KEY;
@@ -121,9 +122,9 @@ function isPhotoConfirmYes(text) {
     const lower = text.toLowerCase().trim();
     // Hanya kata yang sangat spesifik bermakna "proses saja"
     return lower === 'proses' || lower === 'cukup' || lower === 'selesai' ||
-           lower.includes('sudah cukup') || lower.includes('udah cukup') ||
-           lower.includes('foto sudah') || lower.includes('proses saja') ||
-           lower.includes('langsung proses') || lower.includes('cukup kak');
+        lower.includes('sudah cukup') || lower.includes('udah cukup') ||
+        lower.includes('foto sudah') || lower.includes('proses saja') ||
+        lower.includes('langsung proses') || lower.includes('cukup kak');
 }
 
 /** Apakah customer menjawab "belum" / "kurang" */
@@ -131,8 +132,8 @@ function isPhotoConfirmNo(text) {
     if (!text) return false;
     const lower = text.toLowerCase().trim();
     return lower === 'belum' || lower === 'kurang' || lower === 'blm' ||
-           lower.includes('belum cukup') || lower.includes('masih kurang') ||
-           lower.includes('belum semua') || lower.includes('mau tambah');
+        lower.includes('belum cukup') || lower.includes('masih kurang') ||
+        lower.includes('belum semua') || lower.includes('mau tambah');
 }
 
 // ─── Fungsi AI Balasan Umum (Tagih Nomor Pesanan) ────────────────────────────
@@ -277,16 +278,29 @@ async function handleOrderFound(waClient, customer, orderResult, supabase) {
 
 
 // ─── Handler: Nomor Pesanan Tidak Ditemukan ───────────────────────────────────
+/**
+ * [v2 - RACE CONDITION FIX]
+ * Daripada langsung menolak customer, kita masukkan ke Pending Queue.
+ * Sistem akan retry otomatis setiap 5 menit (max 6x = 30 menit).
+ * Customer mendapat pesan ramah, BUKAN pesan error.
+ */
 async function handleOrderNotFound(waClient, customer, orderId, supabase) {
-    // Reset order_id agar customer bisa coba lagi
-    await supabase.from('customers').update({ order_id: null }).eq('id', customer.id);
+    // [PENTING] Simpan order_id ke DB — jangan di-null!
+    // Kita butuh ini agar pending_order_service bisa update customer setelah found.
+    await supabase.from('customers').update({ order_id: orderId }).eq('id', customer.id);
 
-    const msg = `⚠️ Maaf kak, nomor pesanan *${orderId}* tidak kami temukan di sistem kami.\n\n` +
-        `Mohon periksa kembali:\n` +
-        `• Nomor pesanan biasanya 14-20 digit angka\n` +
-        `• Pastikan pesanan melalui Tokopedia, Shopee, atau TikTok Shop\n\n` +
-        `Silakan coba kirimkan nomor pesanan Anda kembali 🙏`;
+    // Masukkan ke antrian pending untuk di-retry otomatis
+    pendingOrderService.addPendingOrder(customer.id, orderId, customer.phone_number);
+
+    // Kirim pesan ramah — tidak menyalahkan customer
+    const msg =
+        `✅ Nomor pesanan *${orderId}* sudah kami catat kak!\n\n` +
+        `Saat ini pesanan Anda sedang dalam proses sinkronisasi sistem 🔄\n\n` +
+        `Kami akan otomatis mengirimkan konfirmasi dan detail pesanan dalam beberapa menit ya kak 🙏\n\n` +
+        `_Tidak perlu kirim ulang nomor pesanannya ya kak_ 😊`;
     await sendWAMessage(waClient, customer.phone_number, msg);
+
+    console.log(`[AI-BOT] 📥 Order ${orderId} masuk Pending Queue — retry otomatis 5 menit.`);
 }
 
 // ─── Handler: Pesanan Dibatalkan ──────────────────────────────────────────────
@@ -528,6 +542,15 @@ async function sendPostOrderFollowUp(waClient, phoneNumber, orderId, supabase) {
     await sendWAMessage(waClient, phoneNumber, finalMessage);
 }
 
+// ─── Direct WA Message sender (untuk pending_order_service) ─────────────────
+/**
+ * Versi publik dari sendWAMessage — tidak perlu akses ke closure.
+ * Dipakai oleh pending_order_service.js untuk kirim notifikasi retry.
+ */
+async function sendWAMessageDirect(waClient, phoneNumber, message) {
+    return sendWAMessage(waClient, phoneNumber, message);
+}
+
 module.exports = {
     checkAndRespond,
     checkAndRespondMedia,
@@ -535,4 +558,8 @@ module.exports = {
     invalidateConfigCache,
     detectOrderId,
     withTimeout,
+    // Diekspor agar bisa dipakai oleh pending_order_service
+    handleOrderFound,
+    handleOrderCancelled,
+    sendWAMessageDirect,
 };

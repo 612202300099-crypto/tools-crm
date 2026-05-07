@@ -6,8 +6,9 @@
  */
 
 const OpenAI = require('openai');
-const fs = require('fs');
-const path = require('path');
+const fs     = require('fs');
+const path   = require('path');
+const objectStorage = require('./object_storage_service');
 
 // [BEST PRACTICE] Lazy-init: Jangan buat client saat module di-load.
 // Ini mencegah crash jika OPENAI_API_KEY tidak diisi di .env.
@@ -87,23 +88,22 @@ PROSEDUR WAJIB:
 }
 
 /**
- * Hapus massal file media dari VPS dan database.
- * 
- * @param {Array<{id: string, file_name: string}>} mediaItems - Daftar media yang akan dihapus
- * @param {import('../supabase_shim').SupabaseClient} supabase
+ * Hapus massal file media dari Object Storage/disk dan database.
+ *
+ * @param {Array<{id: string, file_name: string, storage_key?: string, storage_type?: string}>} mediaItems
+ * @param {object} supabase
  * @returns {Promise<{deleted: number, failed: number}>}
  */
 async function deleteMediaBulk(mediaItems, supabase) {
     let deleted = 0;
-    let failed = 0;
+    let failed  = 0;
 
     for (const item of mediaItems) {
         try {
-            // Hapus file fisik di VPS
-            const filePath = path.join(__dirname, '..', 'uploads', item.file_name);
-            if (fs.existsSync(filePath)) {
-                await fs.promises.unlink(filePath);
-            }
+            // Hapus dari object storage ATAU disk lokal berdasarkan storage_type
+            const storageType = item.storage_type || 'local';
+            const storageKey  = item.storage_key  || item.file_name;
+            await objectStorage.deleteMedia(storageKey, storageType);
 
             // Hapus record dari database
             await supabase.from('media').delete().eq('id', item.id);

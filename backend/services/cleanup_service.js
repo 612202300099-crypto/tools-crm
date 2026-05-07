@@ -21,8 +21,9 @@
  */
 
 const path = require('path');
-const fs = require('fs');
+const fs   = require('fs');
 const { execSync } = require('child_process');
+const objectStorage = require('./object_storage_service');
 
 const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
 
@@ -41,22 +42,20 @@ function getDiskUsagePercent() {
     }
 }
 
-// ─── Hapus file fisik + hapus record DB ──────────────────────────────────────
-function deleteMediaRecords(db, mediaList) {
+// ─── Hapus file fisik + hapus record DB ────────────────────────────────────────────
+async function deleteMediaRecords(db, mediaList) {
     let deleted = 0;
-    let failed = 0;
+    let failed  = 0;
 
     const deleteStmt = db.prepare('DELETE FROM media WHERE id = ?');
 
     for (const media of mediaList) {
         try {
-            // Hapus file fisik
-            if (media.file_name) {
-                const filePath = path.join(UPLOADS_DIR, media.file_name);
-                if (fs.existsSync(filePath)) {
-                    fs.unlinkSync(filePath);
-                }
-            }
+            // Hapus dari object storage ATAU disk lokal berdasarkan storage_type
+            const storageType = media.storage_type || 'local';
+            const storageKey  = media.storage_key  || media.file_name;
+            await objectStorage.deleteMedia(storageKey, storageType);
+
             // Hapus record DB
             deleteStmt.run(media.id);
             deleted++;
@@ -91,10 +90,10 @@ function cleanEmptyFolders() {
 // ─── FUNGSI UTAMA ─────────────────────────────────────────────────────────────
 async function runCleanup(forceTier2 = false) {
     const startTime = Date.now();
-    console.log(`\n[${new Date().toISOString()}] 🧹 The Janitor v3 mulai bekerja...`);
+    console.log(`\n[${new Date().toISOString()}] 🧹 The Janitor v4 mulai bekerja (Object Storage Mode)...`);
 
     const diskBefore = getDiskUsagePercent();
-    console.log(`[DISK] 💾 Penggunaan disk: ${diskBefore}%`);
+    console.log(`[DISK] 💾 Penggunaan disk lokal VPS: ${diskBefore}%`);
 
     if (diskBefore >= 95) {
         console.error(`[DISK] 🚨 KRITIS! Disk ${diskBefore}% — Cleanup darurat diaktifkan!`);
@@ -120,7 +119,7 @@ async function runCleanup(forceTier2 = false) {
         tier1Cutoff.setDate(tier1Cutoff.getDate() - tier1Days);
 
         const tier1Media = db.prepare(`
-            SELECT m.id, m.file_name
+            SELECT m.id, m.file_name, m.storage_key, m.storage_type
             FROM media m
             JOIN customers c ON m.customer_id = c.id
             WHERE c.status IN ('VALIDATED', 'SUDAH_KIRIM_FOTO')
@@ -146,7 +145,7 @@ async function runCleanup(forceTier2 = false) {
         tier2Cutoff.setDate(tier2Cutoff.getDate() - tier2Days);
 
         const tier2Media = db.prepare(`
-            SELECT m.id, m.file_name
+            SELECT m.id, m.file_name, m.storage_key, m.storage_type
             FROM media m
             JOIN customers c ON m.customer_id = c.id
             WHERE c.status = 'BELUM_KIRIM_FOTO'
