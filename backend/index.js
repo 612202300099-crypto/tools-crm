@@ -849,20 +849,19 @@ app.post('/api/wa/send', async (req, res) => {
     
     try {
         const chatId = phone_number + '@c.us';
-        await withTimeout(client.sendMessage(chatId, message), 30000, 'sendMessage_API');
+        // [FIX] Timeout ditingkatkan 30s → 45s agar tidak error saat WA lambat
+        await withTimeout(client.sendMessage(chatId, message), 45000, 'sendMessage_API');
 
+        // [FIX] TIDAK perlu insert manual ke DB di sini!
+        // Saat sendMessage berhasil, event 'message_create' otomatis terpicu
+        // dan processMessageCommand() sudah menghandle insert ke tabel messages.
+        // Insert manual di sini = DOBEL di web app (karena event handler juga insert).
+        //
+        // Update timestamp customer saja untuk sorting di dashboard
         if (customer_id) {
-           const { error: insErr } = await supabase.from('messages').insert({
-               customer_id: customer_id,
-               body: message,
-               is_from_me: true,
-               created_at: new Date().toISOString()
-           });
-
-           if (!insErr) {
-               await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
-           }
+            await supabase.from('customers').update({ created_at: new Date().toISOString() }).eq('id', customer_id);
         }
+
         res.json({ success: true, message: 'Sent' });
     } catch (err) {
         res.status(500).json({ error: err.message });
