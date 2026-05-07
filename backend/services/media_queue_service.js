@@ -3,6 +3,20 @@ const path = require('path');
 const { MessageMedia } = require('whatsapp-web.js');
 const { convertHeicToJpg } = require('../utils/heicConverter');
 
+// [PERFORMANCE] Lazy-load sharp agar tidak crash jika belum terinstall
+let _sharp = null;
+function getSharp() {
+    if (_sharp !== null) return _sharp;
+    try {
+        _sharp = require('sharp');
+        console.log('[MEDIA-QUEUE] 🗌️ Sharp image processor siap (kompresi aktif).');
+    } catch (e) {
+        _sharp = false; // false = sudah dicek tapi tidak ada
+        console.warn('[MEDIA-QUEUE] ⚠️ Sharp tidak terinstall — foto disimpan tanpa kompresi. Jalankan: npm install');
+    }
+    return _sharp;
+}
+
 /**
  * MediaQueueService
  * Arsitektur Jangka Panjang untuk menangani unduhan media secara asinkron.
@@ -16,10 +30,10 @@ class MediaQueueService {
         this.queueFile = path.join(__dirname, '../media_queue_state.json');
         
         // Konfigurasi Performa
-        this.concurrency = options.concurrency || 10; // Default 10 worker simultan
-        this.pollingInterval = options.pollingInterval || 1000; // Jeda antar cek (lebih cepat)
+        this.concurrency = options.concurrency || 15; // [FIX] 15 worker (dari 10)
+        this.pollingInterval = options.pollingInterval || 1000;
         this.maxRetries = 3;
-        this.dbTimeout = 15000; // Timeout DB 15 detik
+        this.dbTimeout = 15000;
         
         this.queue = this.loadQueue();
         this.activeWorkers = 0;
@@ -166,17 +180,17 @@ class MediaQueueService {
                 return true; 
             }
 
-            // 2. Unduh Media (Timeout 45s agar tidak gantung)
-            const media = await this.withTimeout(message.downloadMedia(), 45000, 'downloadMedia');
+            // 2. Unduh Media (Timeout 60s)
+            const media = await this.withTimeout(message.downloadMedia(), 60000, 'downloadMedia');
             if (!media || !media.data) throw new Error('Data media kosong');
 
-            // 3. Simpan ke VPS
+            // 3. Proses buffer
             let buffer = Buffer.from(media.data, 'base64');
             const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E6);
             let fileExt = (media.mimetype || 'image/jpeg').split('/')[1].split(';')[0];
-            let ext = fileExt === 'jpeg' ? 'jpg' : fileExt; 
-            
-            // 🎯 DETEKSI DAN KONVERSI HEIC
+            let ext = fileExt === 'jpeg' ? 'jpg' : fileExt;
+
+            // 🔄 DETEKSI DAN KONVERSI HEIC
             if (ext.toLowerCase() === 'heic' || (media.filename && media.filename.toLowerCase().endsWith('.heic'))) {
                 console.log(`[W-${workerId}] 🔄 Memulai konversi HEIC -> JPG...`);
                 try {
@@ -185,7 +199,34 @@ class MediaQueueService {
                     console.log(`[W-${workerId}] ✅ Konversi HEIC sukses!`);
                 } catch (err) {
                     console.error(`[W-${workerId}] ❌ Gagal konversi HEIC:`, err.message);
-                    // Jika gagal, sistem akan tetap simpan sebagai file asli (HEIC)
+                }
+            }
+
+            // [🖥️ DISK SAVER] Kompres foto sebelum disimpan menggunakan sharp
+            // Foto WhatsApp biasanya 2-5MB. Setelah kompres: 300-500KB (hemat 80%!)
+            // Ini adalah fix utama untuk mencegah disk penuh akibat foto tidak terkompresi.
+            const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext.toLowerCase());
+            if (isImage) {
+                const sharp = getSharp();
+                if (sharp) {
+                    try {
+                        const originalSize = buffer.length;
+                        buffer = await sharp(buffer)
+                            .rotate()                              // Auto-rotate berdasarkan EXIF
+                            .resize(1920, 1920, {                  // Max 1920px (Full HD cukup untuk review)
+                                fit: 'inside',
+                                withoutEnlargement: true           // Jangan perbesar foto kecil
+                            })
+                            .jpeg({ quality: 82, progressive: true }) // JPEG 82% quality — tidak terlihat beda
+                            .toBuffer();
+                        ext = 'jpg'; // Selalu simpan sebagai JPG setelah kompres
+                        const savedKB = Math.round((originalSize - buffer.length) / 1024);
+                        const savePct = Math.round((1 - buffer.length / originalSize) * 100);
+                        console.log(`[W-${workerId}] 🗌️ Kompres: ${Math.round(originalSize/1024)}KB → ${Math.round(buffer.length/1024)}KB (hemat ${savePct}%, -${savedKB}KB)`);
+                    } catch (sharpErr) {
+                        // Sharp gagal (misal: file corrupt) — simpan file asli, jangan crash
+                        console.warn(`[W-${workerId}] ⚠️ Kompres gagal, simpan asli: ${sharpErr.message.substring(0, 60)}`);
+                    }
                 }
             }
 

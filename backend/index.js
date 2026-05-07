@@ -475,7 +475,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                 try {
                     const { execSync } = require('child_process');
                     const pct = parseInt(execSync("df / --output=pcent | tail -1").toString().trim(), 10);
-                    if (pct >= 92) {
+                    if (pct >= 96) {
                         console.error(`[DISK-GUARD] 🚨 Disk ${pct}%! Media dari ${customerPhoneNumber} DITOLAK sementara.`);
                         diskOk = false;
                         // Cleanup dengan cooldown 5 menit (cegah spam)
