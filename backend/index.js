@@ -164,10 +164,7 @@ function detectChromePath() {
 }
 
 const client = new Client({
-    authStrategy: new LocalAuth({
-        clientId: "crm-polaroid",
-        dataPath: path.join(__dirname, '.wwebjs_auth') // [v3] Explicit path — cegah data tercecer
-    }),
+    authStrategy: new LocalAuth({ clientId: "crm-polaroid" }),
     puppeteer: {
         headless: true,
         executablePath: detectChromePath(),
@@ -186,14 +183,10 @@ const client = new Client({
             '--disable-renderer-backgrounding',
             '--js-flags=--max-old-space-size=512'  // 512MB lebih aman di VPS
         ]
-    },
-    // [v3 SESSION-FIX] webVersionCache — Lock versi WA Web agar tidak patah saat WA update
-    // Tanpa ini, WA push update server-side → library gagal load → disconnect.
-    // Remote type: otomatis ambil versi stable dari komunitas.
-    webVersionCache: {
-        type: 'remote',
-        remotePath: 'https://raw.githubusercontent.com/AhmadBilal2/whatsapp-web-version/refs/heads/main/html/2.3000.1018982825-alpha.html',
     }
+    // NOTE: webVersionCache TIDAK digunakan — wwebjs/whatsapp-web.js#main fork
+    // sudah menangani versioning secara internal. Menggunakan URL remote yang
+    // salah/404 justru menyebabkan LOGOUT loop.
 });
 
 // [WATCHDOG v3] Inisialisasi Penjaga Stabilitas — Threshold 3 jam (bukan 45 menit)
