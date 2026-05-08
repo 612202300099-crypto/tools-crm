@@ -13,6 +13,7 @@ const { Server } = require('socket.io');
 const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
+const chromeSemaphore = require('./services/chrome_semaphore');
 const cleanupService     = require('./services/cleanup_service');
 const StabilityManager   = require('./services/stability_manager');
 const MediaQueueService  = require('./services/media_queue_service');
@@ -293,7 +294,10 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         
         let chat;
         try {
-            chat = await withTimeout(message.getChat(), 60000, 'getChat');
+            // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
+            chat = await chromeSemaphore.acquire('getChat', () => {
+                return withTimeout(message.getChat(), 60000, 'getChat');
+            }, { priority: 1, timeout: 90000 });
         } catch (e) {
             console.error(`[TIMEOUT-GUARD] getChat gagal/timeout:`, e.message);
             return;

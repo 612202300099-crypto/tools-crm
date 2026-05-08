@@ -3,6 +3,7 @@ const path = require('path');
 const { MessageMedia } = require('whatsapp-web.js');
 const { convertHeicToJpg } = require('../utils/heicConverter');
 const objectStorage = require('./object_storage_service');
+const chromeSemaphore = require('./chrome_semaphore');
 
 // [PERFORMANCE] Lazy-load sharp agar tidak crash jika belum terinstall
 let _sharp = null;
@@ -240,52 +241,73 @@ class MediaQueueService {
 
             console.log(`[W-${workerId}] ⏳ Processing ${job.customerPhone}...`);
             
-            // 1. Dapatkan object pesan asli dari WA
-            let message;
-            try {
-                message = await this.withTimeout(
-                    this.client.getMessageById(job.messageId),
-                    30000,
-                    'getMessageById'
-                );
-            } catch (e) {
-                message = null; // Timeout/error → coba deep search
-            }
-            
-            // Deep search jika cache hilang
-            if (!message) {
-                try {
-                    const chatId = job.messageId.split('_')[1];
-                    const chat = await this.withTimeout(
-                        this.client.getChatById(chatId),
-                        30000,
-                        'getChatById_deepSearch'
-                    );
-                    await this.withTimeout(
-                        chat.fetchMessages({ limit: 20 }),
-                        30000,
-                        'fetchMessages_deepSearch'
-                    );
-                    message = await this.withTimeout(
-                        this.client.getMessageById(job.messageId),
-                        15000,
-                        'getMessageById_retry'
-                    );
-                } catch (e) { /* silent */ }
-            }
+            // ═══════════════════════════════════════════════════════════
+            // CHROME SEMAPHORE: Semua operasi Chrome di-wrap di sini.
+            // Max 5 concurrent Chrome calls → sisanya ANTRI (bukan timeout).
+            // Setelah download selesai, semaphore DILEPAS → compress/upload
+            // jalan TANPA blocking Chrome untuk worker lain.
+            // ═══════════════════════════════════════════════════════════
+            const { message, media } = await chromeSemaphore.acquire(
+                `W-${workerId}:download`,
+                async () => {
+                    // 1. Dapatkan object pesan asli dari WA
+                    let msg;
+                    try {
+                        msg = await this.withTimeout(
+                            this.client.getMessageById(job.messageId),
+                            30000,
+                            'getMessageById'
+                        );
+                    } catch (e) {
+                        msg = null;
+                    }
+                    
+                    // Deep search jika cache hilang
+                    if (!msg) {
+                        try {
+                            const chatId = job.messageId.split('_')[1];
+                            const chat = await this.withTimeout(
+                                this.client.getChatById(chatId),
+                                30000,
+                                'getChatById_deepSearch'
+                            );
+                            await this.withTimeout(
+                                chat.fetchMessages({ limit: 20 }),
+                                30000,
+                                'fetchMessages_deepSearch'
+                            );
+                            msg = await this.withTimeout(
+                                this.client.getMessageById(job.messageId),
+                                15000,
+                                'getMessageById_retry'
+                            );
+                        } catch (e) { /* silent */ }
+                    }
 
-            if (!message || !message.hasMedia) {
+                    if (!msg || !msg.hasMedia) {
+                        return { message: null, media: null };
+                    }
+
+                    // 2. Unduh Media (Chrome-bound)
+                    const mediaData = await this.withTimeout(
+                        msg.downloadMedia(),
+                        this.downloadTimeout,
+                        'downloadMedia'
+                    );
+                    return { message: msg, media: mediaData };
+                },
+                { priority: 2, timeout: 180000 }
+            );
+            // ═══════════════════════════════════════════════════════════
+            // CHROME SEMAPHORE RELEASED — dari sini tidak pakai Chrome lagi
+            // Compress + Upload S3 + DB berjalan parallel dengan download lain
+            // ═══════════════════════════════════════════════════════════
+
+            if (!message || !media) {
                 console.warn(`[W-${workerId}] ⚠️ Skip: Pesan/Media tidak ditemukan.`);
                 return true; 
             }
-
-            // 2. Unduh Media (Timeout configurable — default 90s)
-            const media = await this.withTimeout(
-                message.downloadMedia(),
-                this.downloadTimeout,
-                'downloadMedia'
-            );
-            if (!media || !media.data) throw new Error('Data media kosong');
+            if (!media.data) throw new Error('Data media kosong');
 
             // 3. Proses buffer
             let buffer = Buffer.from(media.data, 'base64');

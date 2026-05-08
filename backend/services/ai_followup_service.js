@@ -1,3 +1,4 @@
+const chromeSemaphore = require('./chrome_semaphore');
 /**
  * AI Follow-Up Service v2
  * ─────────────────────────────────────────────────────────────
@@ -194,11 +195,14 @@ async function getAIReply(conversationHistory, systemPrompt) {
 async function sendWAMessage(waClient, phoneNumber, message) {
     const chatId = phoneNumber + '@c.us';
     await humanJitter();
-    await withTimeout(
-        waClient.sendMessage(chatId, message),
-        60000,
-        'WA_sendMessage'
-    );
+    // [CHROME-SEM] Priority 3 = AI bot (lowest — jangan ganggu download/incoming)
+    await chromeSemaphore.acquire('AI:sendMessage', () => {
+        return withTimeout(
+            waClient.sendMessage(chatId, message),
+            60000,
+            'WA_sendMessage'
+        );
+    }, { priority: 3, timeout: 120000 });
     console.log(`[AI-BOT] 💬 Pesan terkirim ke ${phoneNumber}: "${message.substring(0, 60)}..."`);
 }
 
