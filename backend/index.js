@@ -293,7 +293,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         
         let chat;
         try {
-            chat = await withTimeout(message.getChat(), 30000, 'getChat');
+            chat = await withTimeout(message.getChat(), 60000, 'getChat');
         } catch (e) {
             console.error(`[TIMEOUT-GUARD] getChat gagal/timeout:`, e.message);
             return;
@@ -719,7 +719,7 @@ client.on('message_revoke_everyone', async (after, before) => {
 
         // Poin 1 Lanjutan: Validasi Ruang Obrolan
         try {
-            const chat = await withTimeout(after.getChat(), 30000, 'getChat_revoke');
+            const chat = await withTimeout(after.getChat(), 60000, 'getChat_revoke');
             if (chat) {
                 let checkPhone = chat.id.user;
                 const contact = await withTimeout(chat.getContact(), 4000, 'getContact_revoke');

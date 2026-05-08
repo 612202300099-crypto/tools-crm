@@ -190,8 +190,8 @@ async function processPendingOrders() {
                 }
             }
 
-            // Jeda antar order agar tidak membebani Google Sheets API
-            await new Promise(r => setTimeout(r, 1500));
+            // Jeda antar order — beri Chrome waktu bernapas (10 workers media juga jalan)
+            await new Promise(r => setTimeout(r, 5000));
 
         } catch (err) {
             console.error(`[PENDING-ORDER] ❌ Error memproses order ${pending.order_id}:`, err.message);
