@@ -37,8 +37,13 @@ function getDrive() {
         _google = google;
 
         // Cari service account key
-        const keyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY
-            || path.join(__dirname, '..', 'service-account.json');
+        // [CRITICAL] path.resolve dari __dirname, BUKAN process.cwd()
+        // PM2 bisa start dari folder mana saja → ./service-account.json tidak ketemu
+        // Sama bug-nya dengan .env yang kita fix di index.js
+        const rawKeyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || './service-account.json';
+        const keyPath = path.isAbsolute(rawKeyPath)
+            ? rawKeyPath
+            : path.resolve(path.join(__dirname, '..'), rawKeyPath);
 
         if (!fs.existsSync(keyPath)) {
             console.warn(`[DRIVE] ⚠️ Service Account key tidak ditemukan: ${keyPath}`);
