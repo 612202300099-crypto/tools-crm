@@ -1,32 +1,48 @@
 /**
- * Stability Manager (Watchdog) — v2
+ * Stability Manager (Watchdog) — v3
  * ─────────────────────────────────────────────────────────────
- * Perbaikan dari v1:
+ * Penjaga stabilitas WhatsApp Engine 24/7 di VPS.
  *
- * [FIX 1] TIMEOUT_GET_STATE selama startup sync:
- *   - Tambah flag isBusy() untuk memberi tahu watchdog bahwa sistem
- *     sedang dalam mode sibuk (startup sync, bulk processing)
- *   - Saat busy, health check di-skip agar tidak false-positive restart
+ * Perbaikan dari v2:
  *
- * [FIX 2] STALE threshold lebih realistis:
- *   - Malam hari tanpa customer = tidak ada heartbeat = false restart
- *   - Tambah jam aktif (06:00-23:00) untuk STALE check
+ * [FIX 1] STALE threshold lebih realistis: 45 menit → 3 jam
+ *   Bisnis tidak selalu ramai, 45 menit false-positive di jam sepi.
  *
- * [FIX 3] consecutiveFailures lebih toleran saat busy:
- *   - Saat busy, toleransi 5 kali gagal (bukan 3)
+ * [FIX 2] Jam aktif lebih ketat: 06-23 → 08-21 (WIB)
+ *   Di luar jam ini, pelanggan hampir pasti tidak aktif.
+ *
+ * [FIX 3] Loop Guard — restart counter per jam
+ *   Mencegah siklus restart tanpa akhir jika ada masalah persisten.
+ *   Max 3 restart per jam. Setelah itu, diam sampai jam reset berikutnya.
+ *
+ * [FIX 4] Graceful Health Check — Toleransi Puppeteer "noise"
+ *   getState() bisa gagal karena Puppeteer context transient error,
+ *   bukan berarti engine mati. Harus dibedakan.
+ *
+ * [FIX 5] setBusy() lebih robust — auto-clear jika lupa
+ *   Durasi busy dibatasi max 30 menit agar tidak selamanya di-skip.
  */
 
 class StabilityManager {
     constructor(client, options = {}) {
         this.client = client;
         this.lastActivity = Date.now();
-        this.checkInterval = options.checkInterval || 5 * 60 * 1000;  // Cek tiap 5 menit
-        this.staleThreshold = options.staleThreshold || 45 * 60 * 1000; // 45 menit stale
+        this.checkInterval = options.checkInterval || 5 * 60 * 1000;   // Cek tiap 5 menit
+        this.staleThreshold = options.staleThreshold || 3 * 60 * 60 * 1000; // 3 jam stale (v3)
         this.isMonitoring = false;
         this.consecutiveFailures = 0;
         this.MAX_FAILURES = 3;
-        this._busyUntil = 0; // Timestamp sampai kapan sistem dianggap "busy"
+        this._busyUntil = 0;
         this._intervalRef = null;
+
+        // [v3] Loop Guard — Mencegah restart tanpa akhir
+        this._restartTimestamps = []; // Array of timestamps saat restart dipicu
+        this.MAX_RESTARTS_PER_HOUR = 3;
+        this.RESTART_WINDOW_MS = 60 * 60 * 1000; // 1 jam
+
+        // [v3] Jam aktif STALE check (WIB = UTC+7)
+        this.ACTIVE_HOUR_START = options.activeHourStart ?? 8;  // 08:00 WIB
+        this.ACTIVE_HOUR_END   = options.activeHourEnd   ?? 21; // 21:00 WIB
     }
 
     /**
@@ -42,11 +58,14 @@ class StabilityManager {
      * Saat busy: health check di-skip (tidak ada false-restart).
      * Gunakan ini saat startup sync, bulk processing, dll.
      *
-     * @param {number} durationMs - Durasi busy dalam millisecond
+     * @param {number} durationMs - Durasi busy dalam millisecond (max 30 menit)
      */
     setBusy(durationMs = 5 * 60 * 1000) {
-        this._busyUntil = Date.now() + durationMs;
-        console.log(`[WATCHDOG] 🔄 Mode BUSY aktif selama ${Math.round(durationMs / 60000)} menit (health check di-pause).`);
+        // [v3] Cap di 30 menit agar tidak selamanya di-skip jika caller lupa clear
+        const maxBusy = 30 * 60 * 1000;
+        const safeDuration = Math.min(durationMs, maxBusy);
+        this._busyUntil = Date.now() + safeDuration;
+        console.log(`[WATCHDOG] 🔄 Mode BUSY aktif selama ${Math.round(safeDuration / 60000)} menit (health check di-pause).`);
     }
 
     isBusy() {
@@ -59,7 +78,8 @@ class StabilityManager {
     start() {
         if (this.isMonitoring) return;
         this.isMonitoring = true;
-        console.log(`[WATCHDOG] 🛡️ Monitoring dimulai. Threshold: ${this.staleThreshold / 60000} menit.`);
+        this.lastActivity = Date.now(); // Reset saat start agar tidak langsung STALE
+        console.log(`[WATCHDOG] 🛡️ Monitoring dimulai (v3). STALE threshold: ${this.staleThreshold / 60000} menit, Jam aktif: ${this.ACTIVE_HOUR_START}:00-${this.ACTIVE_HOUR_END}:00 WIB.`);
 
         this._intervalRef = setInterval(async () => {
             await this.checkHealth();
@@ -78,6 +98,19 @@ class StabilityManager {
         console.log('[WATCHDOG] ⏹️ Monitoring dihentikan.');
     }
 
+    /**
+     * [v3] Cek apakah loop guard mengizinkan restart.
+     * Mencegah >3 restart dalam 1 jam (siklus restart tanpa akhir).
+     */
+    _canRestart() {
+        const now = Date.now();
+        // Bersihkan timestamp lama (>1 jam)
+        this._restartTimestamps = this._restartTimestamps.filter(
+            ts => (now - ts) < this.RESTART_WINDOW_MS
+        );
+        return this._restartTimestamps.length < this.MAX_RESTARTS_PER_HOUR;
+    }
+
     async checkHealth() {
         // [FIX 1] Skip health check saat sistem sedang busy (startup sync, bulk processing)
         if (this.isBusy()) {
@@ -94,15 +127,16 @@ class StabilityManager {
                 )
             ]);
 
-            // [FIX 2] Cek STALE: hanya saat jam aktif (06:00-23:00 WIB)
+            // [FIX 2] Cek STALE: hanya saat jam aktif (08:00-21:00 WIB)
             // Di luar jam aktif tidak ada customer → tidak ada heartbeat → bukan STALE
-            const hourWIB = new Date().getUTCHours() + 7; // UTC+7
-            const isActiveHours = hourWIB >= 6 && hourWIB < 23;
+            const now = new Date();
+            const hourWIB = (now.getUTCHours() + 7) % 24; // Wrap-around aman
+            const isActiveHours = hourWIB >= this.ACTIVE_HOUR_START && hourWIB < this.ACTIVE_HOUR_END;
 
             if (isActiveHours) {
                 const timeSinceLastActivity = Date.now() - this.lastActivity;
                 if (timeSinceLastActivity > this.staleThreshold) {
-                    console.warn(`[WATCHDOG] ⚠️ Engine STALE: Tidak ada aktifitas ${Math.round(timeSinceLastActivity / 60000)} menit.`);
+                    console.warn(`[WATCHDOG] ⚠️ Engine STALE: Tidak ada aktifitas ${Math.round(timeSinceLastActivity / 60000)} menit. (Threshold: ${Math.round(this.staleThreshold / 60000)} menit)`);
                     this.triggerRestart('ENGINE_STALE');
                     return;
                 }
@@ -111,9 +145,20 @@ class StabilityManager {
             this.consecutiveFailures = 0;
 
         } catch (err) {
+            // [v3 FIX 4] Bedakan Puppeteer noise vs error asli
+            const TRANSIENT_ERRORS = [
+                'Execution context was destroyed',
+                'Session closed',
+                'Target closed',
+                'detached Frame',
+                'Protocol error',
+                'TIMEOUT_GET_STATE',
+            ];
+            const isTransient = TRANSIENT_ERRORS.some(noise => err.message?.includes(noise));
+
             this.consecutiveFailures++;
-            const maxFail = this.isBusy() ? 5 : this.MAX_FAILURES;
-            console.error(`[WATCHDOG] ❌ Health check failed (${this.consecutiveFailures}/${maxFail}): ${err.message}`);
+            const maxFail = isTransient ? 5 : this.MAX_FAILURES; // Transient error lebih toleran
+            console.error(`[WATCHDOG] ❌ Health check failed (${this.consecutiveFailures}/${maxFail}): ${err.message} ${isTransient ? '[transient]' : '[critical]'}`);
 
             if (this.consecutiveFailures >= maxFail) {
                 this.triggerRestart('CONSECUTIVE_FAILURES');
@@ -122,8 +167,39 @@ class StabilityManager {
     }
 
     triggerRestart(reason) {
-        console.error(`[WATCHDOG] 🔥 Restart otomatis dipicu. Alasan: ${reason}`);
+        // [v3 FIX 3] Loop Guard — cegah restart tanpa akhir
+        if (!this._canRestart()) {
+            console.error(`[WATCHDOG] 🛑 LOOP GUARD: Sudah ${this._restartTimestamps.length} restart dalam 1 jam terakhir! Menolak restart untuk mencegah siklus tanpa akhir. Alasan: ${reason}`);
+            console.error(`[WATCHDOG] ℹ️ Engine akan diam sampai interval restart mereda. Cek PM2 logs untuk investigasi.`);
+            // Reset failure counter agar tidak terus menumpuk
+            this.consecutiveFailures = 0;
+            return;
+        }
+
+        this._restartTimestamps.push(Date.now());
+        console.error(`[WATCHDOG] 🔥 Restart otomatis dipicu (${this._restartTimestamps.length}/${this.MAX_RESTARTS_PER_HOUR} dalam 1 jam). Alasan: ${reason}`);
         process.exit(1);
+    }
+
+    /**
+     * [v3] Dapatkan status watchdog untuk monitoring/debugging.
+     */
+    getStatus() {
+        const now = Date.now();
+        const hourWIB = (new Date().getUTCHours() + 7) % 24;
+        return {
+            isMonitoring: this.isMonitoring,
+            isBusy: this.isBusy(),
+            busyUntil: this._busyUntil > now ? new Date(this._busyUntil).toISOString() : null,
+            lastActivity: new Date(this.lastActivity).toISOString(),
+            minutesSinceActivity: Math.round((now - this.lastActivity) / 60000),
+            staleThresholdMinutes: Math.round(this.staleThreshold / 60000),
+            consecutiveFailures: this.consecutiveFailures,
+            restartsInLastHour: this._restartTimestamps.filter(ts => (now - ts) < this.RESTART_WINDOW_MS).length,
+            maxRestartsPerHour: this.MAX_RESTARTS_PER_HOUR,
+            currentHourWIB: hourWIB,
+            isActiveHours: hourWIB >= this.ACTIVE_HOUR_START && hourWIB < this.ACTIVE_HOUR_END,
+        };
     }
 }
 

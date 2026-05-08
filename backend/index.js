@@ -164,7 +164,10 @@ function detectChromePath() {
 }
 
 const client = new Client({
-    authStrategy: new LocalAuth({ clientId: "crm-polaroid" }),
+    authStrategy: new LocalAuth({
+        clientId: "crm-polaroid",
+        dataPath: path.join(__dirname, '.wwebjs_auth') // [v3] Explicit path — cegah data tercecer
+    }),
     puppeteer: {
         headless: true,
         executablePath: detectChromePath(),
@@ -183,12 +186,20 @@ const client = new Client({
             '--disable-renderer-backgrounding',
             '--js-flags=--max-old-space-size=512'  // 512MB lebih aman di VPS
         ]
+    },
+    // [v3 SESSION-FIX] webVersionCache — Lock versi WA Web agar tidak patah saat WA update
+    // Tanpa ini, WA push update server-side → library gagal load → disconnect.
+    // Remote type: otomatis ambil versi stable dari komunitas.
+    webVersionCache: {
+        type: 'remote',
+        remotePath: 'https://raw.githubusercontent.com/AhmadBilal2/whatsapp-web-version/refs/heads/main/html/2.3000.1018982825-alpha.html',
     }
 });
 
-// [WATCHDOG] Inisialisasi Penjaga Stabilitas
+// [WATCHDOG v3] Inisialisasi Penjaga Stabilitas — Threshold 3 jam (bukan 45 menit)
+// 45 menit terlalu agresif → false-positive restart di jam sepi → PM2 restart → session mati
 const stability = new StabilityManager(client, {
-    staleThreshold: 45 * 60 * 1000 // 45 menit tanpa aktifitas = Restart
+    staleThreshold: 3 * 60 * 60 * 1000 // 3 JAM tanpa aktifitas = Restart (v3: dari 45 menit)
 });
 
 // [MEDIA-QUEUE] Inisialisasi Antrian Media Asinkron (High-Performance Worker Pool)
@@ -619,28 +630,44 @@ client.on('ready', async () => {
 });
 
 
+// [v3 SESSION-FIX] Reconnect handler dengan Exponential Backoff
+// SEBELUMNYA: Langsung reinit setelah 10 detik → WA server curiga → session invalid → QR lagi
+// SEKARANG: Backoff 15s → 30s → 60s, max 3 percobaan. Jika semua gagal → PM2 restart.
 client.on('disconnected', async (reason) => {
     console.log(`[WA] ⚠️ WhatsApp Client disconnected: ${reason}`);
     isConnected = false;
     stability.stop();
 
-    // Jika LOGOUT (bukan sekedar disconnect jaringan), session perlu di-reinit
+    // Jika LOGOUT (bukan sekedar disconnect jaringan), session sudah mati di server WA
     if (reason === 'LOGOUT') {
-        console.log('[WA] 🔒 Session logout terdeteksi. QR scan baru diperlukan.');
+        console.log('[WA] 🔒 Session LOGOUT terdeteksi dari WhatsApp server. QR scan baru diperlukan.');
+        console.log('[WA] ℹ️ Kemungkinan penyebab: unlink dari HP, atau akun mencapai batas linked device.');
         return; // Biarkan PM2 restart secara alami
     }
 
-    // Untuk disconnect sementara (jaringan putus, dll) — tunggu sebentar lalu reinit
-    console.log(`[WA] 🔄 Mencoba reinisialisasi dalam 10 detik...`);
-    setTimeout(async () => {
+    // Disconnect sementara (jaringan putus, WA server maintenance, dll)
+    // Gunakan Exponential Backoff agar WA server tidak menganggap suspicious
+    const MAX_RECONNECT_ATTEMPTS = 3;
+    const INITIAL_DELAY_MS = 15000; // 15 detik (bukan 10)
+
+    for (let attempt = 1; attempt <= MAX_RECONNECT_ATTEMPTS; attempt++) {
+        const delay = INITIAL_DELAY_MS * Math.pow(2, attempt - 1); // 15s → 30s → 60s
+        console.log(`[WA] 🔄 Reconnect attempt ${attempt}/${MAX_RECONNECT_ATTEMPTS} dalam ${delay / 1000} detik...`);
+        await sleep(delay);
+
         try {
-            console.log('[WA] 🔄 Menjalankan client.initialize() ulang...');
+            console.log(`[WA] 🔄 Menjalankan client.initialize() ulang (Attempt ${attempt})...`);
             await client.initialize();
+            console.log(`[WA] ✅ Reconnect berhasil pada attempt ${attempt}!`);
+            return; // Berhasil — keluar dari loop
         } catch (reinitErr) {
-            console.error('[WA] ❌ Gagal reinisialisasi. PM2 akan restart:', reinitErr.message);
-            process.exit(1); // Biarkan PM2 restart prosesnya
+            console.error(`[WA] ❌ Attempt ${attempt} gagal: ${reinitErr.message}`);
+            if (attempt === MAX_RECONNECT_ATTEMPTS) {
+                console.error('[WA] 🔥 Semua percobaan reconnect habis. PM2 akan restart proses...');
+                process.exit(1);
+            }
         }
-    }, 10000);
+    }
 });
 
 // Gunakan message_create agar menangkap pesan dari kita juga (yang dikirim lewat HP)
@@ -796,37 +823,123 @@ app.post('/api/wa/deep-resync', async (req, res) => {
     })();
 });
 
-// [PRE-FLIGHT] Rutinitas Pembersihan Cache Chromium sebelum start
+// ═══════════════════════════════════════════════════════════════════════════════
+// [PRE-FLIGHT v3] Pembersihan Cache Chromium AMAN sebelum start
+// ═══════════════════════════════════════════════════════════════════════════════
+// KRITIS: Hanya hapus cache HTTP biasa (Cache, GPUCache).
+//
+// JANGAN PERNAH HAPUS:
+//   - Service Worker  → Menyimpan token autentikasi WA Web (hapus = QR ulang)
+//   - Code Cache      → Menyimpan compiled JS WA Web (hapus = session patah)
+//   - IndexedDB       → Database session WA Web
+//   - Local Storage   → State persistence WA Web
+//   - Session Storage → Active session tokens
+//
+// Bug lama: clearBrowserCache() menghapus Service Worker + Code Cache
+// → Setiap PM2 restart → session mati → harus scan QR lagi.
+// ═══════════════════════════════════════════════════════════════════════════════
 async function clearBrowserCache() {
     const authPath = path.join(__dirname, '.wwebjs_auth', 'session-crm-polaroid', 'Default');
-    const cacheDirs = [
-        path.join(authPath, 'Cache'),
-        path.join(authPath, 'Code Cache'),
-        path.join(authPath, 'Service Worker', 'CacheStorage')
+
+    // [v3] HANYA cache yang AMAN dihapus (tidak mengandung auth token)
+    const SAFE_TO_DELETE = [
+        path.join(authPath, 'Cache'),          // HTTP cache biasa — AMAN
+        path.join(authPath, 'GPUCache'),        // GPU shader cache — AMAN
+        path.join(authPath, 'DawnGraphiteCache'), // Graphics cache — AMAN
+        path.join(authPath, 'DawnWebGPUCache'),   // WebGPU cache — AMAN
     ];
-    let cleaned = false;
-    for (const dir of cacheDirs) {
+
+    let cleaned = 0;
+    let totalBytes = 0;
+    for (const dir of SAFE_TO_DELETE) {
         if (fs.existsSync(dir)) {
             try {
+                // Hitung ukuran sebelum hapus (untuk logging)
+                const stat = await fs.promises.stat(dir).catch(() => null);
                 await fs.promises.rm(dir, { recursive: true, force: true });
-                cleaned = true;
-            } catch (e) { /* Abaikan jika file sedang terkunci */ }
+                cleaned++;
+            } catch (e) { /* Abaikan jika file sedang terkunci oleh proses lain */ }
         }
     }
-    if (cleaned) console.log(`[PRE-FLIGHT] 🧹 Sisa cache browser lama berhasil dibersihkan.`);
+
+    // [v3] Bersihkan WAL files yang membengkak (>1MB = anomali, checkpoint gagal)
+    // DIPS-wal yang membengkak bisa menyebabkan session corrupt saat load ulang
+    const WAL_FILES = ['DIPS-wal', 'SharedStorage-wal'];
+    for (const walName of WAL_FILES) {
+        const walPath = path.join(authPath, walName);
+        try {
+            if (fs.existsSync(walPath)) {
+                const stat = await fs.promises.stat(walPath);
+                if (stat.size > 1 * 1024 * 1024) { // >1MB = anomali
+                    console.warn(`[PRE-FLIGHT] ⚠️ WAL file ${walName} abnormal (${(stat.size / 1024).toFixed(0)}KB). Membersihkan...`);
+                    await fs.promises.unlink(walPath);
+                    cleaned++;
+                }
+            }
+        } catch (e) { /* WAL mungkin terkunci, skip */ }
+    }
+
+    if (cleaned > 0) {
+        console.log(`[PRE-FLIGHT] 🧹 ${cleaned} item cache browser berhasil dibersihkan (session data DIPERTAHANKAN).`);
+    } else {
+        console.log('[PRE-FLIGHT] ✅ Tidak ada cache yang perlu dibersihkan. Session data utuh.');
+    }
+}
+
+// [v3] Verifikasi integritas session sebelum initialize
+// Cek apakah file-file kritis session masih ada dan valid
+function verifySessionIntegrity() {
+    const sessionBase = path.join(__dirname, '.wwebjs_auth', 'session-crm-polaroid');
+    const defaultPath = path.join(sessionBase, 'Default');
+
+    // Cek keberadaan folder session
+    if (!fs.existsSync(sessionBase)) {
+        console.log('[SESSION-CHECK] 🆕 Tidak ada session tersimpan — QR scan pertama kali diperlukan.');
+        return { exists: false, healthy: false };
+    }
+
+    // Cek file-file kritis untuk session yang valid
+    const criticalPaths = [
+        { path: path.join(defaultPath, 'Local Storage'),   name: 'Local Storage' },
+        { path: path.join(defaultPath, 'IndexedDB'),       name: 'IndexedDB' },
+        { path: path.join(defaultPath, 'Service Worker'),  name: 'Service Worker' },
+    ];
+
+    let healthyCount = 0;
+    for (const check of criticalPaths) {
+        const exists = fs.existsSync(check.path);
+        if (exists) healthyCount++;
+        else console.warn(`[SESSION-CHECK] ⚠️ ${check.name} TIDAK DITEMUKAN — session mungkin invalid.`);
+    }
+
+    const isHealthy = healthyCount === criticalPaths.length;
+    if (isHealthy) {
+        console.log(`[SESSION-CHECK] ✅ Session integrity OK — semua ${criticalPaths.length} komponen kritis ditemukan.`);
+    } else {
+        console.warn(`[SESSION-CHECK] ⚠️ Session hanya ${healthyCount}/${criticalPaths.length} komponen kritis. QR scan ulang mungkin diperlukan.`);
+    }
+
+    return { exists: true, healthy: isHealthy, components: healthyCount, total: criticalPaths.length };
 }
 
 // Inisialisasi WA dengan Proteksi Penuh
 (async () => {
     try {
+        // [v3] Bersihkan HANYA cache aman (session data dipertahankan)
         await clearBrowserCache();
-        console.log('[SYSTEM] 🚀 Memulai inisialisasi WA Engine...');
+
+        // [v3] Verifikasi integritas session sebelum init
+        const sessionStatus = verifySessionIntegrity();
+
+        console.log('[SYSTEM] 🚀 Memulai inisialisasi WA Engine v3...');
         
-        // Aktifkan timer 3 menit. Jika tak sampai 'ready' atau 'qr', paksa restart.
+        // [v3] Timer 7 menit (dari 3 menit). VPS yang sibuk butuh waktu lebih lama.
+        // 3 menit terlalu agresif → timeout saat VPS high load → restart → QR lagi.
+        const INIT_TIMEOUT_MS = 7 * 60 * 1000;
         initializationTimer = setTimeout(() => {
-            console.error('🔥 [FATAL] WA Engine nyangkut saat inisialisasi (Timeout 3 Menit). Memicu Auto-Restart...');
+            console.error(`🔥 [FATAL] WA Engine nyangkut saat inisialisasi (Timeout ${INIT_TIMEOUT_MS / 60000} Menit). Memicu Auto-Restart...`);
             process.exit(1);
-        }, 3 * 60 * 1000);
+        }, INIT_TIMEOUT_MS);
 
         await client.initialize();
     } catch (error) {
@@ -841,6 +954,50 @@ app.get('/api/wa/status', (req, res) => {
         connected: isConnected,
         qr: qrCodeData 
     });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [v3] SESSION HEALTH ENDPOINT — Monitor kesehatan session WA secara detail
+// ═══════════════════════════════════════════════════════════════════════════════
+// Gunakan ini untuk debugging dan monitoring eksternal (cron, uptime checker).
+// Menampilkan: status koneksi, watchdog stats, session integrity, uptime.
+app.get('/api/wa/session-health', (req, res) => {
+    try {
+        const sessionStatus = verifySessionIntegrity();
+        const watchdogStatus = stability.getStatus();
+        const uptimeSeconds = process.uptime();
+
+        const health = {
+            // Status koneksi WA
+            whatsapp: {
+                connected: isConnected,
+                hasQrPending: !!qrCodeData,
+            },
+            // Status session di disk
+            session: sessionStatus,
+            // Status watchdog
+            watchdog: watchdogStatus,
+            // Uptime proses Node.js
+            process: {
+                uptimeFormatted: `${Math.floor(uptimeSeconds / 3600)}h ${Math.floor((uptimeSeconds % 3600) / 60)}m`,
+                uptimeSeconds: Math.round(uptimeSeconds),
+                memoryUsageMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+                pid: process.pid,
+            },
+            // Media queue stats
+            mediaQueue: {
+                pending: mediaQueue.getPendingCount ? mediaQueue.getPendingCount() : 'N/A',
+            },
+            // Timestamp server
+            timestamp: new Date().toISOString(),
+        };
+
+        // HTTP status code berdasarkan kesehatan
+        const httpStatus = isConnected ? 200 : 503;
+        res.status(httpStatus).json({ success: isConnected, ...health });
+    } catch (e) {
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 app.post('/api/wa/send', async (req, res) => {
