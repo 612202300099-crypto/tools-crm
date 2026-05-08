@@ -36,22 +36,6 @@ function getDrive() {
         const { google } = require('googleapis');
         _google = google;
 
-        // Cari service account key
-        // [CRITICAL] path.resolve dari __dirname, BUKAN process.cwd()
-        // PM2 bisa start dari folder mana saja → ./service-account.json tidak ketemu
-        // Sama bug-nya dengan .env yang kita fix di index.js
-        const rawKeyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || './service-account.json';
-        const keyPath = path.isAbsolute(rawKeyPath)
-            ? rawKeyPath
-            : path.resolve(path.join(__dirname, '..'), rawKeyPath);
-
-        if (!fs.existsSync(keyPath)) {
-            console.warn(`[DRIVE] ⚠️ Service Account key tidak ditemukan: ${keyPath}`);
-            console.warn('[DRIVE] 💡 Letakkan file JSON key di backend/service-account.json');
-            _initFailed = true;
-            return null;
-        }
-
         const rootFolderId = process.env.GOOGLE_DRIVE_FOLDER_ID;
         if (!rootFolderId) {
             console.warn('[DRIVE] ⚠️ GOOGLE_DRIVE_FOLDER_ID belum diisi di .env');
@@ -59,10 +43,42 @@ function getDrive() {
             return null;
         }
 
-        const auth = new google.auth.GoogleAuth({
-            keyFile: keyPath,
-            scopes: ['https://www.googleapis.com/auth/drive'],
-        });
+        let auth;
+
+        // ── PRIORITAS 1: OAuth2 (user's own account — PUNYA kuota storage) ──
+        // Service Account punya kuota 0 byte → TIDAK BISA upload file.
+        // OAuth2 pakai akun Google user → kuota 15GB+ → BISA upload.
+        const clientId     = process.env.GOOGLE_OAUTH2_CLIENT_ID;
+        const clientSecret = process.env.GOOGLE_OAUTH2_CLIENT_SECRET;
+        const refreshToken = process.env.GOOGLE_OAUTH2_REFRESH_TOKEN;
+
+        if (clientId && clientSecret && refreshToken) {
+            const oauth2Client = new google.auth.OAuth2(clientId, clientSecret);
+            oauth2Client.setCredentials({ refresh_token: refreshToken });
+            auth = oauth2Client;
+            console.log('[DRIVE] 🔑 Menggunakan OAuth2 (akun user — ada kuota storage).');
+        } else {
+            // ── FALLBACK: Service Account ──────────────────────────────────
+            // Hanya bisa upload ke Shared Drive (Team Drive).
+            // Jika Drive biasa → error "no storage quota".
+            const rawKeyPath = process.env.GOOGLE_SERVICE_ACCOUNT_KEY || './service-account.json';
+            const keyPath = path.isAbsolute(rawKeyPath)
+                ? rawKeyPath
+                : path.resolve(path.join(__dirname, '..'), rawKeyPath);
+
+            if (!fs.existsSync(keyPath)) {
+                console.warn(`[DRIVE] ⚠️ Tidak ada OAuth2 DAN Service Account key.`);
+                console.warn('[DRIVE] 💡 Jalankan: node setup_drive_auth.js');
+                _initFailed = true;
+                return null;
+            }
+
+            auth = new google.auth.GoogleAuth({
+                keyFile: keyPath,
+                scopes: ['https://www.googleapis.com/auth/drive'],
+            });
+            console.log('[DRIVE] 🔑 Menggunakan Service Account (hanya Shared Drive).');
+        }
 
         _drive = google.drive({ version: 'v3', auth });
         console.log(`[DRIVE] ✅ Google Drive API siap. Root folder: ${rootFolderId}`);
