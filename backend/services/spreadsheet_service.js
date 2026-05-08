@@ -73,11 +73,25 @@ function isPolaroidProduct(productName, sku) {
 }
 
 // ─── Helper: Ekstrak jumlah pcs dari SKU/nama varian Polaroid ───────────────────
-// Contoh SKU: "POLAROID25", "POLAROID50", "POL-25PCS", atau nama produk "Polaroid 25 pcs"
+// Contoh SKU: "Polaroid50", "POLAROID25", "POL-25PCS", atau nama produk "Polaroid 25 pcs"
 // Return angka pcs, atau 0 jika tidak ditemukan
+//
+// [BUG FIX] Regex lama: \b(25|50|...)\b
+// GAGAL pada "Polaroid50" karena \b tidak match antara 'D' dan '5'
+// (keduanya word char → tidak ada word boundary).
+// Fix: Cari angka langsung setelah kata "POLAROID" (dengan/tanpa separator).
 function extractPolaroidPcs(productName, sku, variation) {
     const combined = `${productName} ${sku} ${variation}`.toUpperCase();
-    // Cari angka kelipatan 25 dalam teks (25, 50, 75, 100, ...)
+
+    // PASS 1: Cari angka yang menempel/dekat kata POLAROID
+    // Match: "POLAROID50", "POLAROID-25", "POLAROID 75", "POL50", "POL-25PCS"
+    const polaroidMatch = combined.match(/POLAROID[-_ ]?(\d+)/);
+    if (polaroidMatch) {
+        const pcs = parseInt(polaroidMatch[1], 10);
+        if (pcs > 0) return pcs;
+    }
+
+    // PASS 2: Fallback — cari angka berdiri sendiri (word boundary)
     const match = combined.match(/\b(25|50|75|100|125|150|175|200)\b/);
     return match ? parseInt(match[1], 10) : 0;
 }

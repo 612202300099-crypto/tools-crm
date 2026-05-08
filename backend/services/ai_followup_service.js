@@ -273,7 +273,10 @@ async function handleOrderFound(waClient, customer, orderResult, supabase) {
     const detailMsg = formatOrderDetailMessage(orderResult);
     await sendWAMessage(waClient, customer.phone_number, detailMsg);
 
-    console.log(`[AI-BOT] ✅ Detail pesanan ${customer.order_id} dikirim ke ${customer.phone_number} (${storeName}, foto dibutuhkan: ${totalPhotosNeeded}, SKU: ${skuLabel})`);
+    // [BUG FIX] Gunakan customer.order_id ATAU ambil dari items context
+    // customer.order_id bisa null jika objek belum di-refresh dari DB
+    const orderId = customer.order_id || '(dari spreadsheet)';
+    console.log(`[AI-BOT] ✅ Detail pesanan ${orderId} dikirim ke ${customer.phone_number} (${storeName}, foto dibutuhkan: ${totalPhotosNeeded}, SKU: ${skuLabel})`);
 }
 
 
