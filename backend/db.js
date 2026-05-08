@@ -49,7 +49,7 @@ db.exec(`
     CREATE TABLE IF NOT EXISTS pending_orders (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,
         customer_id  TEXT    NOT NULL,
-        order_id     TEXT    NOT NULL,
+        order_id     TEXT    NOT NULL UNIQUE,  -- UNIQUE wajib agar ON CONFLICT(order_id) di UPSERT berfungsi
         phone_number TEXT    NOT NULL,
         retry_count  INTEGER DEFAULT 0,
         max_retries  INTEGER DEFAULT 6,
@@ -57,9 +57,6 @@ db.exec(`
         resolved_at   TEXT,
         created_at    TEXT DEFAULT (datetime('now'))
     );
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_orders_active
-        ON pending_orders(order_id)
-        WHERE resolved_at IS NULL;
 
     CREATE TABLE IF NOT EXISTS ai_config (
         id INTEGER PRIMARY KEY,
@@ -109,4 +106,46 @@ if (!mediaColumns.includes('storage_type')) {
     console.log('[DB] ✅ Migration: Kolom storage_type ditambahkan ke tabel media.');
 }
 
+// ── [MIGRATION] Fix pending_orders: tambah UNIQUE constraint pada order_id ───
+// SQLite tidak support ALTER TABLE ADD UNIQUE, jadi harus rebuild tabel.
+// Tanpa UNIQUE: ON CONFLICT(order_id) di UPSERT akan ERROR.
+try {
+    const poColumns = db.prepare('PRAGMA index_list(pending_orders)').all();
+    const hasUnique = poColumns.some(idx =>
+        idx.unique === 1 && !idx.name.startsWith('idx_pending') && !idx.name.startsWith('sqlite_autoindex')
+    );
+    // Cek apakah sudah ada column-level UNIQUE (sqlite_autoindex_pending_orders_1)
+    const hasAutoIndex = poColumns.some(idx => idx.name.includes('autoindex'));
+    
+    if (!hasAutoIndex) {
+        console.log('[DB] 🔄 Migration: Rebuilding pending_orders dengan UNIQUE(order_id)...');
+        db.exec(`
+            ALTER TABLE pending_orders RENAME TO pending_orders_old;
+            CREATE TABLE pending_orders (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                customer_id  TEXT    NOT NULL,
+                order_id     TEXT    NOT NULL UNIQUE,
+                phone_number TEXT    NOT NULL,
+                retry_count  INTEGER DEFAULT 0,
+                max_retries  INTEGER DEFAULT 6,
+                last_retry_at TEXT,
+                resolved_at   TEXT,
+                created_at    TEXT DEFAULT (datetime('now'))
+            );
+            INSERT OR IGNORE INTO pending_orders 
+                (id, customer_id, order_id, phone_number, retry_count, max_retries, last_retry_at, resolved_at, created_at)
+                SELECT id, customer_id, order_id, phone_number, retry_count, max_retries, last_retry_at, resolved_at, created_at
+                FROM pending_orders_old;
+            DROP TABLE pending_orders_old;
+        `);
+        console.log('[DB] ✅ Migration: pending_orders rebuilt dengan UNIQUE(order_id).');
+    }
+} catch (e) {
+    // Tabel mungkin sudah benar, atau belum ada — abaikan
+    if (!e.message.includes('no such table')) {
+        console.warn('[DB] ⚠️ Migration pending_orders:', e.message);
+    }
+}
+
 module.exports = db;
+
