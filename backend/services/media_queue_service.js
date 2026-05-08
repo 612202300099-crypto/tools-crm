@@ -10,7 +10,7 @@ function getSharp() {
     if (_sharp !== null) return _sharp;
     try {
         _sharp = require('sharp');
-        console.log('[MEDIA-QUEUE] 🗌️ Sharp image processor siap (kompresi aktif).');
+        console.log('[MEDIA-QUEUE] 🖼️ Sharp image processor siap (kompresi aktif).');
     } catch (e) {
         _sharp = false; // false = sudah dicek tapi tidak ada
         console.warn('[MEDIA-QUEUE] ⚠️ Sharp tidak terinstall — foto disimpan tanpa kompresi. Jalankan: npm install');
@@ -18,10 +18,33 @@ function getSharp() {
     return _sharp;
 }
 
+// [v4] Helper: Cek disk usage (Linux). Return persentase (0-100) atau -1 jika gagal.
+function getDiskUsagePercent() {
+    try {
+        const { execSync } = require('child_process');
+        const output = execSync("df / --output=pcent | tail -1", { encoding: 'utf8', timeout: 5000 });
+        return parseInt(output.trim().replace('%', ''), 10);
+    } catch (e) {
+        return -1; // Gagal cek (mungkin bukan Linux)
+    }
+}
+
 /**
- * MediaQueueService
- * Arsitektur Jangka Panjang untuk menangani unduhan media secara asinkron.
- * Dioptimasi dengan Worker Pool untuk menangani antrian ribuan secara cepat.
+ * MediaQueueService v4
+ * ─────────────────────────────────────────────────────────────
+ * PERUBAHAN v4 dari v3:
+ * - Concurrency: 15 → 3 (satu Chrome TIDAK BISA handle 15 download paralel)
+ * - Download timeout: 60s → 90s (configurable)
+ * - Polling interval: 1s → 2s (kurangi beban Chrome)
+ * - Disk check sebelum setiap job (jika >96%, skip job)
+ * - Worker jeda antar job WAJIB (tidak boleh 0ms)
+ * - getPendingCount() untuk monitoring endpoint
+ *
+ * KENAPA 15 WORKER ITU BERBAHAYA:
+ * Semua download melewati SATU instance Chrome via DevTools Protocol.
+ * 15 panggilan simultan = Chrome harus handle 15 WebSocket messages sekaligus.
+ * Chrome kewalahan → "Runtime.callFunctionOn timed out" → crash →
+ * "Execution context destroyed" → WA session mati → harus scan QR ulang.
  */
 class MediaQueueService {
     constructor(client, supabase, options = {}) {
@@ -30,9 +53,10 @@ class MediaQueueService {
         this.PUBLIC_API_URL = options.publicUrl || 'https://api-wa.parecustom.com';
         this.queueFile = path.join(__dirname, '../media_queue_state.json');
         
-        // Konfigurasi Performa
-        this.concurrency = options.concurrency || 15; // [FIX] 15 worker (dari 10)
-        this.pollingInterval = options.pollingInterval || 1000;
+        // Konfigurasi Performa v4
+        this.concurrency = options.concurrency || 3;           // [v4] 3 worker (JANGAN >5!)
+        this.pollingInterval = options.pollingInterval || 2000; // [v4] 2 detik antar job
+        this.downloadTimeout = options.downloadTimeout || 90000; // [v4] 90 detik download
         this.maxRetries = 3;
         this.dbTimeout = 15000;
         
@@ -40,7 +64,7 @@ class MediaQueueService {
         this.activeWorkers = 0;
         this.isProcessing = false;
         
-        console.log(`[MEDIA-QUEUE] 🛠️ Inisialisasi dengan ${this.concurrency} worker.`);
+        console.log(`[MEDIA-QUEUE] 🛠️ Inisialisasi dengan ${this.concurrency} worker (timeout: ${this.downloadTimeout / 1000}s).`);
     }
 
     loadQueue() {
@@ -56,11 +80,23 @@ class MediaQueueService {
 
     saveQueue() {
         try {
-            // Kita simpan berkala agar tidak berat di I/O
+            // [v4] Cek disk sebelum write — jangan sampai ENOSPC crash proses
+            const diskPct = getDiskUsagePercent();
+            if (diskPct > 98) {
+                console.warn('[MEDIA-QUEUE] ⚠️ Disk >98% — skip saveQueue untuk cegah ENOSPC crash.');
+                return;
+            }
             fs.writeFileSync(this.queueFile, JSON.stringify(this.queue, null, 2));
         } catch (e) {
             console.error('[MEDIA-QUEUE] ❌ Gagal menyimpan state antrian:', e.message);
         }
+    }
+
+    /**
+     * [v4] Cek berapa item yang sedang menunggu (untuk monitoring endpoint)
+     */
+    getPendingCount() {
+        return this.queue.length;
     }
 
     /**
@@ -98,8 +134,6 @@ class MediaQueueService {
     /**
      * Spawn worker baru hingga batas concurrency.
      * Method ini aman dipanggil kapan saja — idempotent.
-     * [FIX] Ini adalah perbaikan dari arsitektur lama yang hanya
-     * memanggil startProcessing() (yang return early jika isProcessing=true).
      */
     spawnWorkers() {
         if (this.queue.length === 0) return;
@@ -110,7 +144,6 @@ class MediaQueueService {
             const workerId = this.activeWorkers; // snapshot ID sebelum async
 
             if (this.activeWorkers === 1) {
-                // Log hanya saat worker pertama spawn (tidak spam)
                 console.log(`[MEDIA-QUEUE] 🔥 Worker Pool aktif. Concurrency: ${this.concurrency}`);
             }
 
@@ -152,27 +185,61 @@ class MediaQueueService {
                 console.error(`[W-${workerId}] ❌ Error Fatal:`, e.message);
             }
 
-            // Jeda dinamis: Jika prioritas, jangan kasih jeda. Jika normal, kasih jeda pendek.
-            if (this.queue.length > 0 && !job.isPriority) {
-                await new Promise(r => setTimeout(r, this.pollingInterval));
-            }
+            // [v4] Jeda WAJIB antar job — beri Chrome waktu bernapas
+            // Tanpa jeda: worker langsung ambil job berikutnya → Chrome belum pulih → timeout → crash
+            const jitter = Math.floor(Math.random() * 1000); // 0-1 detik random
+            await new Promise(r => setTimeout(r, this.pollingInterval + jitter));
         }
     }
 
     async processJob(job, workerId = 0) {
         try {
+            // [v4] DISK GUARD — Cek disk sebelum proses
+            // Jika disk >96% DAN Object Storage TIDAK aktif, skip job
+            // (jika Object Storage aktif, foto ke cloud, disk lokal tidak terpakai)
+            const diskPct = getDiskUsagePercent();
+            if (diskPct > 96) {
+                const objStorageActive = await objectStorage.isObjectStorageAvailable();
+                if (!objStorageActive) {
+                    console.warn(`[W-${workerId}] 🚨 Disk ${diskPct}% + Object Storage MATI — skip job ${job.customerPhone} (cegah ENOSPC crash).`);
+                    return true; // Return true = jangan retry (sia-sia kalau disk penuh)
+                }
+                // Object Storage aktif → aman lanjut (foto ke cloud)
+            }
+
             console.log(`[W-${workerId}] ⏳ Processing ${job.customerPhone}...`);
             
             // 1. Dapatkan object pesan asli dari WA
-            let message = await this.client.getMessageById(job.messageId);
+            let message;
+            try {
+                message = await this.withTimeout(
+                    this.client.getMessageById(job.messageId),
+                    30000,
+                    'getMessageById'
+                );
+            } catch (e) {
+                message = null; // Timeout/error → coba deep search
+            }
             
             // Deep search jika cache hilang
             if (!message) {
                 try {
                     const chatId = job.messageId.split('_')[1];
-                    const chat = await this.client.getChatById(chatId);
-                    await chat.fetchMessages({ limit: 20 });
-                    message = await this.client.getMessageById(job.messageId);
+                    const chat = await this.withTimeout(
+                        this.client.getChatById(chatId),
+                        30000,
+                        'getChatById_deepSearch'
+                    );
+                    await this.withTimeout(
+                        chat.fetchMessages({ limit: 20 }),
+                        30000,
+                        'fetchMessages_deepSearch'
+                    );
+                    message = await this.withTimeout(
+                        this.client.getMessageById(job.messageId),
+                        15000,
+                        'getMessageById_retry'
+                    );
                 } catch (e) { /* silent */ }
             }
 
@@ -181,8 +248,12 @@ class MediaQueueService {
                 return true; 
             }
 
-            // 2. Unduh Media (Timeout 60s)
-            const media = await this.withTimeout(message.downloadMedia(), 60000, 'downloadMedia');
+            // 2. Unduh Media (Timeout configurable — default 90s)
+            const media = await this.withTimeout(
+                message.downloadMedia(),
+                this.downloadTimeout,
+                'downloadMedia'
+            );
             if (!media || !media.data) throw new Error('Data media kosong');
 
             // 3. Proses buffer
@@ -204,8 +275,6 @@ class MediaQueueService {
             }
 
             // [🖥️ DISK SAVER] Kompres foto sebelum disimpan menggunakan sharp
-            // Foto WhatsApp biasanya 2-5MB. Setelah kompres: 300-500KB (hemat 80%!)
-            // Ini adalah fix utama untuk mencegah disk penuh akibat foto tidak terkompresi.
             const isImage = ['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext.toLowerCase());
             if (isImage) {
                 const sharp = getSharp();
@@ -214,18 +283,17 @@ class MediaQueueService {
                         const originalSize = buffer.length;
                         buffer = await sharp(buffer)
                             .rotate()                              // Auto-rotate berdasarkan EXIF
-                            .resize(1920, 1920, {                  // Max 1920px (Full HD cukup untuk review)
+                            .resize(1920, 1920, {                  // Max 1920px
                                 fit: 'inside',
-                                withoutEnlargement: true           // Jangan perbesar foto kecil
+                                withoutEnlargement: true
                             })
-                            .jpeg({ quality: 82, progressive: true }) // JPEG 82% quality — tidak terlihat beda
+                            .jpeg({ quality: 82, progressive: true })
                             .toBuffer();
-                        ext = 'jpg'; // Selalu simpan sebagai JPG setelah kompres
+                        ext = 'jpg';
                         const savedKB = Math.round((originalSize - buffer.length) / 1024);
                         const savePct = Math.round((1 - buffer.length / originalSize) * 100);
-                        console.log(`[W-${workerId}] 🗌️ Kompres: ${Math.round(originalSize/1024)}KB → ${Math.round(buffer.length/1024)}KB (hemat ${savePct}%, -${savedKB}KB)`);
+                        console.log(`[W-${workerId}] 🖼️ Kompres: ${Math.round(originalSize/1024)}KB → ${Math.round(buffer.length/1024)}KB (hemat ${savePct}%, -${savedKB}KB)`);
                     } catch (sharpErr) {
-                        // Sharp gagal (misal: file corrupt) — simpan file asli, jangan crash
                         console.warn(`[W-${workerId}] ⚠️ Kompres gagal, simpan asli: ${sharpErr.message.substring(0, 60)}`);
                     }
                 }
@@ -235,8 +303,6 @@ class MediaQueueService {
             const mimeType = `image/${ext === 'jpg' ? 'jpeg' : ext}`;
 
             // [OBJECT STORAGE] Upload ke object storage (S3-compatible)
-            // Jika gagal total setelah 3 retry, otomatis fallback ke disk lokal.
-            // TIDAK ADA FOTO CUSTOMER YANG HILANG.
             const { url: publicUrl, key: storageKey, storageType } = await objectStorage.uploadMedia(
                 buffer,
                 fileName,
@@ -244,7 +310,6 @@ class MediaQueueService {
             );
 
             console.log(`[W-${workerId}] ☁️ Tersimpan di ${storageType === 'object' ? 'Object Storage' : 'Disk Lokal'}: ${fileName}`);
-
 
             // 4. Cari Message di DB (Timeout Guard)
             const { data: msgRecord, error: msgFindError } = await this.withTimeout(

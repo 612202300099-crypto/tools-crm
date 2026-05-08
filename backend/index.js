@@ -171,6 +171,11 @@ const client = new Client({
     puppeteer: {
         headless: true,
         executablePath: detectChromePath(),
+        // [v4 CRITICAL] protocolTimeout — Default Puppeteer = 30 detik.
+        // Di VPS, Chrome sering butuh lebih lama untuk merespons karena CPU/RAM terbatas.
+        // Tanpa ini: 15 worker download → Chrome kewalahan → "Runtime.callFunctionOn timed out"
+        // → Chrome crash → "Execution context destroyed" → Session mati → QR ulang.
+        protocolTimeout: 180000, // 180 detik (3 menit) — cukup untuk VPS lambat
         // [BEST PRACTICE] Args optimasi untuk VPS Linux 24/7
         args: [
             '--no-sandbox',               // Wajib di Linux tanpa root sandboxing
@@ -187,9 +192,6 @@ const client = new Client({
             '--js-flags=--max-old-space-size=512'  // 512MB lebih aman di VPS
         ]
     }
-    // NOTE: webVersionCache TIDAK digunakan — wwebjs/whatsapp-web.js#main fork
-    // sudah menangani versioning secara internal. Menggunakan URL remote yang
-    // salah/404 justru menyebabkan LOGOUT loop.
 });
 
 // [WATCHDOG v3] Inisialisasi Penjaga Stabilitas — Threshold 3 jam (bukan 45 menit)
@@ -198,11 +200,16 @@ const stability = new StabilityManager(client, {
     staleThreshold: 3 * 60 * 60 * 1000 // 3 JAM tanpa aktifitas = Restart (v3: dari 45 menit)
 });
 
-// [MEDIA-QUEUE] Inisialisasi Antrian Media Asinkron (High-Performance Worker Pool)
+// [MEDIA-QUEUE v4] Antrian Media Asinkron
+// ⚠️ JANGAN NAIKKAN CONCURRENCY DI ATAS 3!
+// Semua download media melewati SATU instance Chrome (DevTools Protocol).
+// 15 worker = 15 panggilan simultan ke Chrome = Chrome kewalahan = crash = session mati.
+// 3 worker = beban ringan, Chrome stabil, session aman.
 const mediaQueue = new MediaQueueService(client, supabase, {
     publicUrl: PUBLIC_API_URL,
-    concurrency: 15, // 15 Worker simultan untuk memangkas antrian ribuan
-    pollingInterval: 1000 // Jeda 1 detik antar cek
+    concurrency: 3,          // [v4] 3 worker (dari 15) — cegah Chrome crash
+    pollingInterval: 2000,   // [v4] Jeda 2 detik antar job (dari 1 detik)
+    downloadTimeout: 90000,  // [v4] 90 detik untuk download (dari 60 detik)
 });
 
 // FUNGSI PENDUKUNG: Resolving LID ke Nomor HP asli secara agresif
