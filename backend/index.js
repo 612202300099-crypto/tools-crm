@@ -595,9 +595,8 @@ client.on('ready', async () => {
             if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
 
             try {
-                // [FIX] Kurangi delay dari 1500ms → 500ms (3x lebih cepat)
-                // Tetap ada jeda kecil agar tidak memicu rate-limit WA
-                await sleep(500);
+                // [FIX] Jeda antar chat — beri Chrome breathing room
+                await sleep(1500);
 
                 // Skip chat yang pesan terakhirnya sudah lama
                 if (chat.lastMessage && chat.lastMessage.timestamp < limitTimestamp) {
@@ -609,11 +608,14 @@ client.on('ready', async () => {
                 // Tangkap semua jenis error timeout dengan graceful skip
                 let historyMessages = [];
                 try {
-                    historyMessages = await withTimeout(
-                        chat.fetchMessages({ limit: 50 }),
-                        45000,
-                        'fetchMessages_startup'
-                    );
+                    // [CHROME-SEM] Startup sync = priority 2, antri di belakang incoming
+                    historyMessages = await chromeSemaphore.acquire('SYNC:fetchMessages', () => {
+                        return withTimeout(
+                            chat.fetchMessages({ limit: 50 }),
+                            45000,
+                            'fetchMessages_startup'
+                        );
+                    }, { priority: 2, timeout: 90000 });
                 } catch (fetchErr) {
                     // Skip chat ini, tapi jangan gagalkan seluruh sync
                     console.warn(`[SYNC] ⚠️ Skip chat ${chat.id.user}: ${fetchErr.message.substring(0, 60)}`);
@@ -956,6 +958,17 @@ function verifySessionIntegrity() {
         process.exit(1);
     }
 })();
+
+// Health check endpoint (untuk monitoring + Cloudflare)
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        uptime: Math.floor(process.uptime()),
+        connected: isConnected,
+        memory: Math.round(process.memoryUsage().rss / 1024 / 1024) + 'MB',
+        chrome: chromeSemaphore.getStats(),
+    });
+});
 
 // Endpoint status
 app.get('/api/wa/status', (req, res) => {
