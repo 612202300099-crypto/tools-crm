@@ -111,6 +111,67 @@ async function runCleanup(forceTier2 = false) {
         const db = getDb();
 
         // ═══════════════════════════════════════════════════════════
+        // TIER 0: EMERGENCY — Hapus file LOKAL yang sudah aman di Object Storage
+        // Ini adalah cleanup paling efektif karena Object Storage = cloud,
+        // file lokal hanyalah salinan yang bisa dihapus tanpa kehilangan data.
+        // ═══════════════════════════════════════════════════════════
+        if (diskBefore >= 80) {
+            console.log(`[TIER-0] 🚨 Disk ${diskBefore}% — Menghapus file lokal yang sudah ada di Object Storage...`);
+            let tier0Deleted = 0;
+
+            try {
+                // Cari semua media yang storage_type = 'object' (sudah di cloud)
+                const cloudMedia = db.prepare(`
+                    SELECT id, file_name, storage_key, storage_type FROM media
+                    WHERE storage_type = 'object' AND file_name IS NOT NULL
+                `).all();
+
+                for (const media of cloudMedia) {
+                    // Cek apakah file lokal masih ada di disk
+                    const localPath = path.join(UPLOADS_DIR, media.file_name);
+                    if (fs.existsSync(localPath)) {
+                        try {
+                            fs.unlinkSync(localPath);
+                            tier0Deleted++;
+                        } catch (e) { /* silent */ }
+                    }
+                }
+
+                // Juga scan folder uploads/ untuk file yatim (tidak ada di DB)
+                if (diskBefore >= 95 && fs.existsSync(UPLOADS_DIR)) {
+                    const customerDirs = fs.readdirSync(UPLOADS_DIR, { withFileTypes: true });
+                    for (const dir of customerDirs) {
+                        if (!dir.isDirectory()) continue;
+                        const dirPath = path.join(UPLOADS_DIR, dir.name);
+                        try {
+                            const files = fs.readdirSync(dirPath);
+                            for (const file of files) {
+                                const relPath = `${dir.name}/${file}`;
+                                // Cek apakah file ini sudah di Object Storage
+                                const inCloud = db.prepare(
+                                    `SELECT 1 FROM media WHERE file_name = ? AND storage_type = 'object' LIMIT 1`
+                                ).get(relPath);
+                                if (inCloud) {
+                                    fs.unlinkSync(path.join(dirPath, file));
+                                    tier0Deleted++;
+                                }
+                            }
+                        } catch (e) { /* silent */ }
+                    }
+                }
+
+                if (tier0Deleted > 0) {
+                    console.log(`[TIER-0] ✅ ${tier0Deleted} file lokal dihapus (sudah aman di Object Storage).`);
+                    console.log(`[TIER-0] 💾 Disk sekarang: ${getDiskUsagePercent()}%`);
+                } else {
+                    console.log(`[TIER-0] ✅ Tidak ada file lokal yang perlu dihapus.`);
+                }
+            } catch (e) {
+                console.warn(`[TIER-0] ⚠️ Error:`, e.message);
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════
         // TIER 1: VALIDATED atau SUDAH_KIRIM_FOTO → hapus foto
         // Normal mode: >3 hari | Crisis mode (disk>90%): >1 hari
         // ═══════════════════════════════════════════════════════════
