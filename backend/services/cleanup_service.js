@@ -189,7 +189,7 @@ async function runCleanup(forceTier2 = false) {
 
         if (tier1Media.length > 0) {
             console.log(`[TIER-1] 🗑️ Menghapus ${tier1Media.length} foto VALIDATED/SUDAH_KIRIM_FOTO (>${tier1Days} hari)...`);
-            const { deleted, failed } = deleteMediaRecords(db, tier1Media);
+            const { deleted, failed } = await deleteMediaRecords(db, tier1Media);
             totalDeleted += deleted;
             totalFailed += failed;
             console.log(`[TIER-1] ✅ ${deleted} dihapus, ${failed} gagal.`);
@@ -215,7 +215,7 @@ async function runCleanup(forceTier2 = false) {
 
         if (tier2Media.length > 0) {
             console.log(`[TIER-2] 🗑️ Menghapus ${tier2Media.length} foto customer abandoned (>${tier2Days} hari)...`);
-            const { deleted, failed } = deleteMediaRecords(db, tier2Media);
+            const { deleted, failed } = await deleteMediaRecords(db, tier2Media);
             totalDeleted += deleted;
             totalFailed += failed;
             console.log(`[TIER-2] ✅ ${deleted} dihapus, ${failed} gagal.`);

@@ -53,24 +53,47 @@ class MediaQueueService {
         this.PUBLIC_API_URL = options.publicUrl || 'https://api-wa.parecustom.com';
         this.queueFile = path.join(__dirname, '../media_queue_state.json');
         
-        // Konfigurasi Performa v4
-        this.concurrency = options.concurrency || 3;           // [v4] 3 worker (JANGAN >5!)
-        this.pollingInterval = options.pollingInterval || 2000; // [v4] 2 detik antar job
-        this.downloadTimeout = options.downloadTimeout || 90000; // [v4] 90 detik download
+        // Konfigurasi Performa v5
+        this.concurrency = options.concurrency || 5;             // [v5] 5 worker (max aman dengan protocolTimeout 180s)
+        this.pollingInterval = options.pollingInterval || 1500;  // [v5] 1.5 detik antar job (lebih cepat)
+        this.downloadTimeout = options.downloadTimeout || 90000; // 90 detik download
         this.maxRetries = 3;
         this.dbTimeout = 15000;
+        this.maxQueueSize = 300;                                // [v5] Max antrian — buang terlama jika penuh
+        this.maxAgeMs = 2 * 60 * 60 * 1000;                    // [v5] 2 jam — item lebih tua pasti gagal (WA cache expired)
         
         this.queue = this.loadQueue();
         this.activeWorkers = 0;
         this.isProcessing = false;
         
-        console.log(`[MEDIA-QUEUE] 🛠️ Inisialisasi dengan ${this.concurrency} worker (timeout: ${this.downloadTimeout / 1000}s).`);
+        console.log(`[MEDIA-QUEUE] 🛠️ Inisialisasi v5: ${this.concurrency} worker, max antrian ${this.maxQueueSize}, timeout ${this.downloadTimeout / 1000}s.`);
     }
 
     loadQueue() {
         try {
             if (fs.existsSync(this.queueFile)) {
-                return JSON.parse(fs.readFileSync(this.queueFile, 'utf8'));
+                let queue = JSON.parse(fs.readFileSync(this.queueFile, 'utf8'));
+                const before = queue.length;
+
+                // [v5] PRUNE: Hapus item lebih tua dari 2 jam
+                // WhatsApp tidak menyimpan media di cache Chrome lebih dari ~2 jam.
+                // Item lama PASTI gagal → buang agar tidak buang waktu worker.
+                const cutoff = Date.now() - (2 * 60 * 60 * 1000);
+                queue = queue.filter(job => {
+                    const addedTime = job.addedAt ? new Date(job.addedAt).getTime() : 0;
+                    return addedTime > cutoff;
+                });
+
+                // [v5] CAP: Batasi ukuran antrian
+                if (queue.length > 300) {
+                    queue = queue.slice(-300); // Ambil 300 terbaru
+                }
+
+                const pruned = before - queue.length;
+                if (pruned > 0) {
+                    console.log(`[MEDIA-QUEUE] 🧹 Pruned ${pruned} item expired dari antrian (${before} → ${queue.length}).`);
+                }
+                return queue;
             }
         } catch (e) {
             console.error('[MEDIA-QUEUE] ❌ Gagal memuat state antrian:', e.message);
@@ -121,6 +144,13 @@ class MediaQueueService {
             console.log(`[MEDIA-QUEUE] 🚀 PRIORITAS: ${customer.phone_number} masuk jalur cepat!`);
         } else {
             this.queue.push(newJob);
+        }
+
+        // [v5] Enforce max queue size — buang item TERLAMA jika penuh
+        if (this.queue.length > this.maxQueueSize) {
+            const dropped = this.queue.length - this.maxQueueSize;
+            this.queue = this.queue.slice(-this.maxQueueSize);
+            console.warn(`[MEDIA-QUEUE] ⚠️ Antrian melebihi ${this.maxQueueSize} — ${dropped} item terlama dibuang.`);
         }
 
         this.saveQueue();

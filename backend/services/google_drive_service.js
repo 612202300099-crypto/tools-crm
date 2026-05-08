@@ -137,6 +137,7 @@ async function getOrCreateFolder(folderName, parentId, folderPath) {
             fields: 'files(id, name)',
             supportsAllDrives: true,
             includeItemsFromAllDrives: true,
+            corpora: 'allDrives',   // [FIX] Wajib untuk Shared Drive
         });
 
         if (searchRes.data.files && searchRes.data.files.length > 0) {
@@ -342,39 +343,54 @@ async function processUploadQueue() {
             db.prepare(`UPDATE drive_upload_queue SET status = 'UPLOADING' WHERE id = ?`).run(item.id);
 
             // 1. Download file dari Object Storage / local disk
+            console.log(`[DRIVE] ⬇️ [${item.id}] Download: ${item.storage_type} | ${(item.storage_key || item.file_url).split('/').pop()}`);
             let buffer;
             if (item.storage_type === 'object' && item.file_url) {
                 // Download dari Object Storage via public URL
                 const response = await fetch(item.file_url, {
                     signal: AbortSignal.timeout(60000),
                 });
-                if (!response.ok) throw new Error(`HTTP ${response.status} downloading ${item.file_url}`);
+                if (!response.ok) throw new Error(`HTTP ${response.status} download gagal: ${item.file_url}`);
                 const arrayBuf = await response.arrayBuffer();
                 buffer = Buffer.from(arrayBuf);
+                console.log(`[DRIVE] ✅ [${item.id}] Download OK: ${Math.round(buffer.length / 1024)}KB`);
             } else {
                 // Baca dari disk lokal
-                const localPath = item.file_url.replace(
-                    process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com',
-                    path.join(__dirname, '..')
-                );
+                // file_url bisa berupa: https://api-wa.parecustom.com/uploads/xxx/foto.jpg
+                // atau path relatif: uploads/xxx/foto.jpg
+                let localPath;
+                const publicUrl = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com';
+                if (item.file_url && item.file_url.startsWith(publicUrl)) {
+                    // URL publik → convert ke path lokal
+                    const relativePath = item.file_url.replace(publicUrl, '').replace(/^\//, '');
+                    localPath = path.join(__dirname, '..', relativePath);
+                } else if (item.file_name) {
+                    localPath = path.join(__dirname, '..', 'uploads', item.file_name);
+                } else {
+                    localPath = path.join(__dirname, '..', 'uploads', item.file_url);
+                }
                 if (!fs.existsSync(localPath)) {
                     throw new Error(`File lokal tidak ditemukan: ${localPath}`);
                 }
                 buffer = fs.readFileSync(localPath);
+                console.log(`[DRIVE] ✅ [${item.id}] Baca lokal OK: ${Math.round(buffer.length / 1024)}KB`);
             }
 
             // 2. Buat hierarki folder
+            console.log(`[DRIVE] 📁 [${item.id}] Folder: ${item.store_name}/${item.product_abbr}/${item.resi}_${item.sku}`);
             const folderId = await ensureFolderHierarchy(
                 item.store_name,
                 item.product_abbr,
                 item.resi,
                 item.sku
             );
+            console.log(`[DRIVE] ✅ [${item.id}] Folder OK: ${folderId}`);
 
             await sleep(500);
 
-            // 3. Upload file
+            // 3. Upload file ke Shared Drive
             const baseName = (item.storage_key || item.file_url).split('/').pop();
+            console.log(`[DRIVE] ⬆️ [${item.id}] Uploading ${baseName} (${Math.round(buffer.length / 1024)}KB) ke folder ${folderId}...`);
             const { fileId } = await uploadFile(
                 buffer,
                 baseName,
@@ -389,7 +405,7 @@ async function processUploadQueue() {
                 WHERE id = ?
             `).run(fileId, item.id);
 
-            console.log(`[DRIVE] ✅ Upload sukses: ${item.product_abbr}/${item.resi}_${item.sku}/${baseName}`);
+            console.log(`[DRIVE] ✅ [${item.id}] Upload SUKSES: ${item.product_abbr}/${item.resi}_${item.sku}/${baseName} (Drive ID: ${fileId})`);
 
             // Jeda antar upload (rate limit protection)
             await sleep(1500);
