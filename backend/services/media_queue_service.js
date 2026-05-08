@@ -53,14 +53,15 @@ class MediaQueueService {
         this.PUBLIC_API_URL = options.publicUrl || 'https://api-wa.parecustom.com';
         this.queueFile = path.join(__dirname, '../media_queue_state.json');
         
-        // Konfigurasi Performa v5
-        this.concurrency = options.concurrency || 5;             // [v5] 5 worker (max aman dengan protocolTimeout 180s)
-        this.pollingInterval = options.pollingInterval || 1500;  // [v5] 1.5 detik antar job (lebih cepat)
-        this.downloadTimeout = options.downloadTimeout || 90000; // 90 detik download
+        // Konfigurasi Performa v5 — configurable via .env
+        // VPS 2GB: MEDIA_WORKERS=5 | VPS 8GB: MEDIA_WORKERS=10
+        this.concurrency = parseInt(process.env.MEDIA_WORKERS) || options.concurrency || 5;
+        this.pollingInterval = parseInt(process.env.MEDIA_POLL_MS) || options.pollingInterval || 1500;
+        this.downloadTimeout = parseInt(process.env.MEDIA_TIMEOUT_MS) || options.downloadTimeout || 90000;
         this.maxRetries = 3;
         this.dbTimeout = 15000;
-        this.maxQueueSize = 300;                                // [v5] Max antrian — buang terlama jika penuh
-        this.maxAgeMs = 2 * 60 * 60 * 1000;                    // [v5] 2 jam — item lebih tua pasti gagal (WA cache expired)
+        this.maxQueueSize = parseInt(process.env.MEDIA_MAX_QUEUE) || 300;
+        this.maxAgeMs = 2 * 60 * 60 * 1000; // 2 jam — item lebih tua pasti gagal
         
         this.queue = this.loadQueue();
         this.activeWorkers = 0;
