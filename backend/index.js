@@ -1,4 +1,7 @@
-require('dotenv').config();
+// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
+// BUKAN dari process.cwd() — karena PM2 bisa start dari folder mana saja.
+// Tanpa ini, jika PM2 start dari /root/ → .env di /root/tools-crm/backend/.env tidak terbaca!
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const express = require('express');
 const cors = require('cors');
 const multer = require('multer');

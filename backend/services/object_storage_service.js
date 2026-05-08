@@ -48,6 +48,12 @@ function getS3() {
         const secretKey  = process.env.OBJECT_STORAGE_SECRET_KEY;
 
         if (!endpoint || !accessKey || !secretKey) {
+            // [v2] Log SPESIFIK field mana yang kosong agar mudah debug
+            const missing = [];
+            if (!endpoint)  missing.push('OBJECT_STORAGE_ENDPOINT');
+            if (!accessKey) missing.push('OBJECT_STORAGE_ACCESS_KEY');
+            if (!secretKey) missing.push('OBJECT_STORAGE_SECRET_KEY');
+            console.warn(`[OBJ-STORAGE] ⚠️ ENV kosong: ${missing.join(', ')}. Pastikan .env terbaca oleh dotenv.`);
             return null; // Belum dikonfigurasi
         }
 
@@ -59,10 +65,13 @@ function getS3() {
         });
 
         _s3Commands = { PutObjectCommand, DeleteObjectCommand, HeadBucketCommand };
+        console.log(`[OBJ-STORAGE] ✅ S3 Client berhasil dibuat. Endpoint: ${endpoint}`);
         return { client: _s3Client, cmds: _s3Commands };
 
     } catch (e) {
-        // SDK belum terinstall
+        // SDK belum terinstall — log detail agar tidak bingung
+        console.error(`[OBJ-STORAGE] ❌ Gagal load @aws-sdk/client-s3: ${e.message}`);
+        console.error(`[OBJ-STORAGE] 💡 Jalankan: npm install @aws-sdk/client-s3`);
         return null;
     }
 }
