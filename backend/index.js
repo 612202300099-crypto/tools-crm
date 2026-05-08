@@ -544,6 +544,8 @@ client.on('qr', (qr) => {
     qrCodeData = qr;
     isConnected = false;
     console.log('New QR code generated - please scan');
+    // Print QR ke terminal agar bisa scan langsung dari SSH
+    try { qrcode.generate(qr, { small: true }); } catch(e) {}
 });
 
 client.on('ready', async () => {
