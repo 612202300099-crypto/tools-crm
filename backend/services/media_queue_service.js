@@ -344,6 +344,47 @@ class MediaQueueService {
                 this.dbTimeout, 'updateCustomerDB'
             );
 
+            // 7. [v2] Queue upload ke Google Drive (non-blocking)
+            // Decoupled: jika Drive error, foto tetap aman di Object Storage
+            try {
+                const driveService = require('./google_drive_service');
+                // Ambil data customer untuk info toko, resi, produk
+                const { data: custData } = await this.withTimeout(
+                    this.supabase.from('customers').select('order_id, store_name, resi, order_detail').eq('id', job.customerId).single(),
+                    this.dbTimeout, 'getCustomerForDrive'
+                );
+
+                if (custData && custData.order_id) {
+                    // Parse order_detail untuk ambil productAbbr dan sku
+                    let productAbbr = 'LAINNYA';
+                    let sku = '';
+                    try {
+                        const detail = JSON.parse(custData.order_detail || '[]');
+                        const mainItem = detail.find(i => i.isPolaroid) || detail[0];
+                        if (mainItem) {
+                            productAbbr = mainItem.productAbbr || 'LAINNYA';
+                            sku = mainItem.sku || '';
+                        }
+                    } catch (e) { /* silent */ }
+
+                    driveService.queueUpload({
+                        customerId: job.customerId,
+                        mediaId: msgRecord.id,
+                        fileUrl: publicUrl,
+                        storageKey,
+                        storageType,
+                        orderId: custData.order_id,
+                        storeName: custData.store_name,
+                        resi: custData.resi,
+                        productAbbr,
+                        sku,
+                    });
+                }
+            } catch (driveErr) {
+                // Drive queue error TIDAK boleh menggagalkan media processing
+                console.warn(`[W-${workerId}] ⚠️ Drive queue skip: ${driveErr.message.substring(0, 60)}`);
+            }
+
             console.log(`[W-${workerId}] ✅ Sukses! ${job.customerPhone}`);
             return true;
         } catch (err) {

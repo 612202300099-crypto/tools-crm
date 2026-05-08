@@ -147,5 +147,47 @@ try {
     }
 }
 
-module.exports = db;
+// ── [MIGRATION] Kolom resi di tabel customers ───────────────────────────────
+// Resi (nomor resi pengiriman) diambil dari spreadsheet kolom AP/AN
+if (!existingColumns.includes('resi')) {
+    db.exec(`ALTER TABLE customers ADD COLUMN resi TEXT;`);
+    console.log('[DB] ✅ Migration: Kolom resi ditambahkan ke tabel customers.');
+}
 
+// ── [MIGRATION] Tabel drive_folders — Cache Google Drive folder ID ───────────
+// Mencegah pembuatan folder duplikat + mempercepat lookup
+db.exec(`
+    CREATE TABLE IF NOT EXISTS drive_folders (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        folder_path  TEXT UNIQUE NOT NULL,   -- "VENTURA/POLAROID/JKT123_Polaroid50"
+        drive_id     TEXT NOT NULL,          -- Google Drive folder ID
+        parent_id    TEXT,                   -- Parent Drive folder ID
+        created_at   TEXT DEFAULT (datetime('now'))
+    );
+`);
+
+// ── [MIGRATION] Tabel drive_upload_queue — Antrian upload foto ke Drive ─────
+// Decoupled dari media queue: jika Drive down, media queue tetap jalan
+db.exec(`
+    CREATE TABLE IF NOT EXISTS drive_upload_queue (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id  TEXT NOT NULL,
+        media_id     TEXT,                          -- Referensi ke tabel media
+        file_url     TEXT NOT NULL,                 -- URL foto di Object Storage / local
+        storage_key  TEXT,                          -- Key di Object Storage
+        storage_type TEXT DEFAULT 'local',          -- 'object' atau 'local'
+        order_id     TEXT,
+        store_name   TEXT,
+        resi         TEXT,
+        product_abbr TEXT,                          -- POLAROID, GANCI, STIKERFOTO
+        sku          TEXT,                          -- SKU asli untuk penamaan folder
+        status       TEXT DEFAULT 'PENDING',        -- PENDING, UPLOADING, DONE, FAILED, WAITING_RESI
+        retry_count  INTEGER DEFAULT 0,
+        max_retries  INTEGER DEFAULT 5,
+        error_msg    TEXT,
+        drive_file_id TEXT,                         -- ID file di Google Drive setelah upload
+        created_at   TEXT DEFAULT (datetime('now'))
+    );
+`);
+
+module.exports = db;

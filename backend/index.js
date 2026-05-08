@@ -1395,5 +1395,19 @@ server.listen(PORT, '0.0.0.0', () => {
         } catch (e) { /* silent — df mungkin tidak tersedia di Windows */ }
     });
     console.log('💾 Disk Monitor aktif: cek tiap jam, cleanup darurat otomatis jika >90%.');
-});
 
+    // ── GOOGLE DRIVE UPLOAD: Proses antrian setiap 30 detik ─────────────
+    // Foto dari Object Storage di-upload ke Google Drive dengan hierarki:
+    // PESANAN → TOKO → PRODUK → RESI_SKU → foto.jpg
+    const driveService = require('./services/google_drive_service');
+    setInterval(async () => {
+        if (!isConnected) return;
+        try {
+            await driveService.processUploadQueue();
+        } catch (e) {
+            console.error('[CRON] Drive upload error:', e.message);
+        }
+    }, 30000); // Setiap 30 detik
+    const driveStatus = driveService.getDrive() ? '🟢 AKTIF' : '🔴 TIDAK AKTIF (cek .env + service-account.json)';
+    console.log(`☁️ Google Drive Upload: ${driveStatus} — proses antrian setiap 30 detik.`);
+});

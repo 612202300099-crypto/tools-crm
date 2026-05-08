@@ -53,7 +53,39 @@ const COL = {
     SKU:         6,  // I untuk Ventura, G untuk Custombase
     PRODUCT:     7,  // J untuk Ventura, H untuk Custombase
     QUANTITY:    9,  // L untuk Ventura, J untuk Custombase
+    // [v2] Kolom Resi:
+    // Ventura/Giftyours: AP = absolute 41, relative = 41 - 2 = 39
+    // Custombase:        AN = absolute 39, relative = 39 - 0 = 39
+    // Kebetulan SAMA: 39 untuk semua toko ✅
+    RESI:       39,
 };
+
+// ─── Mapping Singkatan Produk (untuk penamaan folder Google Drive) ────────────
+// Keyword dicari di nama produk (case-insensitive)
+// Urutan penting: yang lebih spesifik duluan
+const PRODUCT_ABBREVIATIONS = [
+    { keywords: ['gantungan kunci', 'ganci', 'keychain'], abbr: 'GANCI' },
+    { keywords: ['polaroid', 'cetak foto'], abbr: 'POLAROID' },
+    { keywords: ['stiker foto', 'sticker foto', 'stiker custom'], abbr: 'STIKERFOTO' },
+    { keywords: ['hologram'], abbr: 'HOLOGRAM' },
+];
+
+/**
+ * Dapatkan singkatan produk dari nama produk lengkap.
+ * Contoh: "Custom Gantungan Kunci Akrilik 2 Sisi" → "GANCI"
+ * @param {string} productName
+ * @returns {string} Singkatan produk, atau 'LAINNYA' jika tidak cocok
+ */
+function getProductAbbreviation(productName) {
+    if (!productName) return 'LAINNYA';
+    const lower = productName.toLowerCase();
+    for (const entry of PRODUCT_ABBREVIATIONS) {
+        if (entry.keywords.some(kw => lower.includes(kw))) {
+            return entry.abbr;
+        }
+    }
+    return 'LAINNYA';
+}
 
 // ─── In-Memory Cache ─────────────────────────────────────────────────────────────
 const orderCache = new Map(); // key: orderId, value: { result, timestamp }
@@ -98,8 +130,9 @@ function extractPolaroidPcs(productName, sku, variation) {
 
 // ─── Fungsi Utama: Fetch satu sheet dari Google Sheets API ───────────────────────
 async function fetchSheetData(spreadsheetId, sheetName, apiKey) {
-    // [BEST PRACTICE] Ambil A:N (14 kolom) untuk mengakomodasi Variation di kolom K-M
-    const range = encodeURIComponent(`${sheetName}!A:N`);
+    // [v2] Ambil A:AQ (43 kolom) — mencakup sampai kolom resi (AP/AN)
+    // Sebelumnya A:N (14 kolom) tidak cukup untuk membaca kolom resi
+    const range = encodeURIComponent(`${sheetName}!A:AQ`);
     const url   = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${range}?key=${apiKey}`;
 
     const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
@@ -145,23 +178,27 @@ async function lookupInStore(store, orderId, apiKey) {
         };
     }
 
+    // [v2] Ambil nomor resi dari kolom AP/AN
+    const resi = getCol(matchedRows[0], 'RESI', offset);
+
     // Parse semua item pesanan
     const items = matchedRows.map(row => {
         const sku         = getCol(row, 'SKU', offset);
         const productName = getCol(row, 'PRODUCT', offset);
         const qty         = parseInt(getCol(row, 'QUANTITY', offset), 10) || 1;
-        const variation   = (row[COL.SKU + offset + 1] || '').toString().trim(); // Kolom Variation (K untuk Ventura)
+        const variation   = (row[COL.SKU + offset + 1] || '').toString().trim();
         const isPolaroid  = isPolaroidProduct(productName, sku);
         const polaroidPcs = isPolaroid ? extractPolaroidPcs(productName, sku, variation) : 0;
+        const productAbbr = getProductAbbreviation(productName);
 
         return {
             sku,
             productName,
+            productAbbr,   // [v2] Singkatan untuk folder Drive
             qty,
             variation,
             isPolaroid,
             polaroidPcs,
-            // Jumlah foto jika Polaroid: pcs × qty
             photosNeeded: isPolaroid ? (polaroidPcs * qty) : 0,
         };
     });
@@ -176,6 +213,7 @@ async function lookupInStore(store, orderId, apiKey) {
         store: store.name,
         storeName: store.displayName,
         status: statusRaw,
+        resi,              // [v2] Nomor resi pengiriman
         items,
         totalPhotosNeeded,
         hasPolaroid,
@@ -280,4 +318,4 @@ function formatOrderDetailMessage(orderResult) {
     return message;
 }
 
-module.exports = { lookupOrder, formatOrderDetailMessage, isPolaroidProduct };
+module.exports = { lookupOrder, formatOrderDetailMessage, isPolaroidProduct, getProductAbbreviation };

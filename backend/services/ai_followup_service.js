@@ -245,7 +245,7 @@ async function sendExampleImage(waClient, phoneNumber, config, supabase, custome
 
 // ─── Handler: Nomor Pesanan Ditemukan di Spreadsheet ─────────────────────────
 async function handleOrderFound(waClient, customer, orderResult, supabase) {
-    const { store, storeName, items, totalPhotosNeeded, hasPolaroid } = orderResult;
+    const { store, storeName, items, totalPhotosNeeded, hasPolaroid, resi } = orderResult;
 
     // Buat label SKU untuk kolom nama di dashboard
     // Format: SKU produk pertama (utamakan yang Polaroid)
@@ -253,17 +253,17 @@ async function handleOrderFound(waClient, customer, orderResult, supabase) {
     const mainItem = polaroidItem || items[0];
     const skuLabel = mainItem ? (mainItem.sku || mainItem.productName.substring(0, 20)) : '';
 
-    // [FEATURE] Update nama customer dengan info SKU agar terlihat di dashboard
-    // Format: "Nama Asli | SKU: KODE_SKU"
-    const currentName = customer.name || 'Pelanggan';
-    const baseName = currentName.includes(' | SKU:') ? currentName.split(' | SKU:')[0] : currentName;
-    const newName = skuLabel ? `${baseName} | SKU: ${skuLabel}` : baseName;
+    // [v2] Format nama customer: "Polaroid200 - Giftyours"
+    // Sebelumnya: "Nama Asli | SKU: KODE_SKU" → kurang informatif
+    // Sekarang: SKU langsung sebagai nama + toko, agar dashboard mudah dibaca
+    const newName = skuLabel ? `${skuLabel} - ${storeName}` : (customer.name || 'Pelanggan');
 
-    // [BUG FIX] Status harus BELUM_KIRIM_FOTO karena kita baru minta foto,
-    // bukan SUDAH_KIRIM_FOTO. Status diubah ke SUDAH hanya setelah foto diterima.
+    // [v2] Simpan resi ke customer record (untuk Google Drive folder naming)
+    // Resi diambil dari kolom AP/AN di spreadsheet
     await supabase.from('customers').update({
         name: newName,
         store_name: store,
+        resi: resi || null,            // [v2] Nomor resi pengiriman
         order_detail: JSON.stringify(items),
         required_photos: totalPhotosNeeded,
         status: 'BELUM_KIRIM_FOTO',
@@ -273,10 +273,8 @@ async function handleOrderFound(waClient, customer, orderResult, supabase) {
     const detailMsg = formatOrderDetailMessage(orderResult);
     await sendWAMessage(waClient, customer.phone_number, detailMsg);
 
-    // [BUG FIX] Gunakan customer.order_id ATAU ambil dari items context
-    // customer.order_id bisa null jika objek belum di-refresh dari DB
     const orderId = customer.order_id || '(dari spreadsheet)';
-    console.log(`[AI-BOT] ✅ Detail pesanan ${orderId} dikirim ke ${customer.phone_number} (${storeName}, foto dibutuhkan: ${totalPhotosNeeded}, SKU: ${skuLabel})`);
+    console.log(`[AI-BOT] ✅ Detail pesanan ${orderId} dikirim ke ${customer.phone_number} (${storeName}, resi: ${resi || '-'}, foto: ${totalPhotosNeeded}, SKU: ${skuLabel})`);
 }
 
 
