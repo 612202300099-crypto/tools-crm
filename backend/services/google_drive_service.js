@@ -394,24 +394,76 @@ async function processUploadQueue() {
     }
 
     // 2. Ambil PENDING items (max 10 per batch)
+    // [FIX] Hanya proses foto dari customer yang SUDAH KONFIRMASI (photo_confirmed=1)
+    // Ini mencegah upload foto ke Drive sebelum customer selesai kirim semua foto.
+    // Untuk non-Polaroid (required_photos=0): izinkan langsung upload setelah status SUDAH_KIRIM_FOTO
     let pendingItems;
     try {
         pendingItems = db.prepare(`
-            SELECT * FROM drive_upload_queue
-            WHERE status = 'PENDING' AND retry_count < max_retries
-            ORDER BY created_at ASC
+            SELECT duq.*
+            FROM drive_upload_queue duq
+            LEFT JOIN customers c ON c.id = duq.customer_id
+            WHERE duq.status = 'PENDING'
+              AND duq.retry_count < duq.max_retries
+              AND (
+                c.photo_confirmed = 1
+                OR c.status = 'SUDAH_KIRIM_FOTO'
+                OR c.id IS NULL
+              )
+            ORDER BY duq.created_at ASC
             LIMIT 10
         `).all();
     } catch (e) {
-        console.error('[DRIVE] ❌ Gagal query pending:', e.message);
-        return;
+        // Fallback jika kolom customers tidak cocok (e.g., kolom lama)
+        try {
+            pendingItems = db.prepare(`
+                SELECT * FROM drive_upload_queue
+                WHERE status = 'PENDING' AND retry_count < max_retries
+                ORDER BY created_at ASC
+                LIMIT 10
+            `).all();
+        } catch (e2) {
+            console.error('[DRIVE] ❌ Gagal query pending:', e2.message);
+            return;
+        }
     }
 
     if (pendingItems.length === 0) return;
 
+    // [FIX] Cek jumlah foto Polaroid per customer sebelum upload
+    // Kelompokkan item per customer untuk validasi hitungan
+    const customerPhotoMap = {}; // customerId -> { uploaded: 0, limit: N }
+    for (const item of pendingItems) {
+        if (!customerPhotoMap[item.customer_id]) {
+            try {
+                // Ambil required_photos dari SQLite (jika ada kolom di customers lokal)
+                // atau pakai 0 = tidak terbatas (non-Polaroid)
+                let required = 0;
+                try {
+                    const custRow = db.prepare(
+                        `SELECT required_photos FROM customers WHERE id = ? LIMIT 1`
+                    ).get(item.customer_id);
+                    required = custRow ? (custRow.required_photos || 0) : 0;
+                } catch (e) { /* kolom tidak ada di local DB, skip */ }
+                customerPhotoMap[item.customer_id] = { uploaded: 0, limit: required };
+            } catch (e) {
+                customerPhotoMap[item.customer_id] = { uploaded: 0, limit: 0 };
+            }
+        }
+    }
+
     console.log(`[DRIVE] 🔄 Memproses ${pendingItems.length} upload ke Google Drive...`);
 
     for (const item of pendingItems) {
+        // [FIX] Polaroid: lewati foto berlebih (lebih dari required_photos)
+        const photoStats = customerPhotoMap[item.customer_id];
+        if (photoStats && photoStats.limit > 0 && photoStats.uploaded >= photoStats.limit) {
+            // Tandai sebagai SKIPPED (jangan upload foto berlebih)
+            db.prepare(`UPDATE drive_upload_queue SET status = 'SKIPPED' WHERE id = ?`).run(item.id);
+            console.warn(`[DRIVE] ⏭️ [${item.id}] SKIP foto berlebih: customer ${item.customer_id} sudah ${photoStats.uploaded}/${photoStats.limit}`);
+            continue;
+        }
+
         try {
             // Mark as UPLOADING
             db.prepare(`UPDATE drive_upload_queue SET status = 'UPLOADING' WHERE id = ?`).run(item.id);
@@ -475,14 +527,19 @@ async function processUploadQueue() {
                 folderId
             );
 
-            // 4. Mark as DONE
+            // 4. Mark as DONE + increment counter untuk validasi foto Polaroid
             db.prepare(`
                 UPDATE drive_upload_queue
                 SET status = 'DONE', drive_file_id = ?
                 WHERE id = ?
             `).run(fileId, item.id);
 
-            console.log(`[DRIVE] ✅ [${item.id}] Upload SUKSES: ${item.product_abbr}/${item.resi}_${item.sku}/${baseName} (Drive ID: ${fileId})`);
+            // [FIX] Tambah counter agar foto berikutnya bisa dicek batasnya
+            if (customerPhotoMap[item.customer_id]) {
+                customerPhotoMap[item.customer_id].uploaded++;
+            }
+
+            console.log(`[DRIVE] ✅ [${item.id}] Upload SUKSES: ${item.product_abbr}/${item.resi}_${item.sku}/${baseName} (${photoStats?.uploaded || '?'}/${photoStats?.limit || '∞'})`);
 
             // Jeda antar upload (rate limit protection)
             await sleep(1500);
