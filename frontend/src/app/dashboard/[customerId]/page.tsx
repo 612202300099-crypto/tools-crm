@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
-import apiClient, { initSocket } from "@/lib/apiClient";
+import apiClient, { initSocket, API_BASE_URL } from "@/lib/apiClient";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
 import { ArrowLeft, Download, CheckCircle, Image as ImageIcon, MessageSquare, Send, ScanSearch, Trash2 } from "lucide-react";
@@ -23,7 +23,7 @@ type Media = {
   file_name: string;
 };
 
-const WA_API_URL = "https://api-wa.parecustom.com";
+const WA_API_URL = API_BASE_URL;
 
 export default function ChatDetail() {
   const params = useParams();

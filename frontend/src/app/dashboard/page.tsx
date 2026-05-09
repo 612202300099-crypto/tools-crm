@@ -226,7 +226,7 @@ function DashboardInboxContent() {
 
     setIsDeleting(true);
     try {
-        const waUrl = "https://api-wa.parecustom.com"; // API Production
+        const waUrl = API_BASE_URL; // API Production
         const res = await fetch(`${waUrl}/api/wa/delete-chats`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

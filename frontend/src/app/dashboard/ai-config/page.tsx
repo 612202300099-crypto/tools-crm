@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import { Bot, Power, Upload, Save, Image, AlertTriangle, CheckCircle, Loader2, RefreshCw, Video, Link as LinkIcon } from "lucide-react";
 
-const API_URL = "https://api-wa.parecustom.com";
+import { API_BASE_URL } from "@/lib/apiClient";
+const API_URL = API_BASE_URL;
 
 const DEFAULT_PROMPT = `Kamu adalah CS yang ramah dari toko online kami. Tugasmu HANYA satu: meminta nomor pesanan ke customer dengan sopan dan sabar.
 
