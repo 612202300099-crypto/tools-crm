@@ -354,9 +354,16 @@ function queueUpload(params) {
  * Google Drive API rate limit = 12 requests/detik.
  * Jika paralel → 429 Too Many Requests → semua gagal.
  */
+let isProcessingQueue = false;
+
 async function processUploadQueue() {
+    if (isProcessingQueue) return;
+
     const drive = getDrive();
     if (!drive) return; // Drive tidak dikonfigurasi — skip silently
+
+    isProcessingQueue = true;
+    try {
 
     const db = getDb();
 
@@ -570,6 +577,9 @@ async function processUploadQueue() {
     }
 
     console.log('[DRIVE] ✅ Batch selesai.');
+    } finally {
+        isProcessingQueue = false;
+    }
 }
 
 // ─── Status / Stats ─────────────────────────────────────────────────────────
