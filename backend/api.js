@@ -142,4 +142,77 @@ router.get('/customers/:id/media', authenticateToken, (req, res) => {
     }
 });
 
+router.post('/customers/:id/drive-sync', authenticateToken, (req, res) => {
+    try {
+        const { mediaIds } = req.body;
+        if (!mediaIds || !Array.isArray(mediaIds) || mediaIds.length === 0) {
+            return res.status(400).json({ error: 'Tidak ada foto yang dipilih' });
+        }
+
+        const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+        if (!customer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
+        
+        if (!customer.resi) {
+            return res.status(400).json({ error: 'Gagal: Customer ini belum memiliki nomor pesanan (resi)' });
+        }
+
+        // Parse detail pesanan untuk mendapatkan productAbbr dan sku
+        let productAbbr = 'LAINNYA';
+        let sku = '';
+        try {
+            const detail = JSON.parse(customer.order_detail || '[]');
+            const mainItem = detail.find(i => i.isPolaroid) || detail[0];
+            if (mainItem) {
+                productAbbr = mainItem.productAbbr || 'LAINNYA';
+                sku = mainItem.sku || '';
+            }
+        } catch (e) { /* silent */ }
+
+        let pushed = 0;
+        const insertStmt = db.prepare(`
+            INSERT INTO drive_upload_queue
+                (customer_id, media_id, file_url, storage_key, storage_type,
+                 order_id, store_name, resi, product_abbr, sku,
+                 photo_index, customer_phone, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const updateStmt = db.prepare(`
+            UPDATE drive_upload_queue 
+            SET status = 'PENDING', resi = ?, store_name = ?, product_abbr = ?, sku = ?
+            WHERE media_id = ?
+        `);
+
+        db.transaction(() => {
+            // Ambil detail media
+            const placeholders = mediaIds.map(() => '?').join(',');
+            const mediaList = db.prepare(`SELECT * FROM media WHERE id IN (${placeholders})`).all(...mediaIds);
+
+            for (const media of mediaList) {
+                // Cek apakah sudah ada di antrean
+                const existing = db.prepare('SELECT id FROM drive_upload_queue WHERE media_id = ?').get(media.id);
+                
+                if (existing) {
+                    // Update status jadi PENDING untuk memaksa retry
+                    updateStmt.run(customer.resi, customer.store_name, productAbbr, sku, media.id);
+                    pushed++;
+                } else {
+                    // Insert baru. Karena manual, kita beri photoIndex fallback misal ID media
+                    insertStmt.run(
+                        customer.id, media.id, media.file_url, media.storage_key, media.storage_type,
+                        customer.order_id || null, customer.store_name || null, customer.resi, productAbbr, sku,
+                        media.id, customer.phone_number, 'PENDING'
+                    );
+                    pushed++;
+                }
+            }
+        })();
+
+        res.json({ success: true, pushed });
+    } catch (err) {
+        console.error('[API] Error manual drive sync:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 module.exports = { router, authenticateToken };

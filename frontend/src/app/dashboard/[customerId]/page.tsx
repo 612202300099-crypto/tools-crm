@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import apiClient, { initSocket, API_BASE_URL } from "@/lib/apiClient";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
-import { ArrowLeft, Download, CheckCircle, Image as ImageIcon, MessageSquare, Send, ScanSearch, Trash2 } from "lucide-react";
+import { ArrowLeft, Download, CheckCircle, Image as ImageIcon, MessageSquare, Send, ScanSearch, Trash2, Cloud } from "lucide-react";
 import Link from "next/link";
 import clsx from "clsx";
 
@@ -51,6 +51,7 @@ export default function ChatDetail() {
   // Fitur Baru: Scan AI & Hapus Media
   const [isScanning, setIsScanning] = useState(false);
   const [isDeletingMedia, setIsDeletingMedia] = useState(false);
+  const [isSyncingDrive, setIsSyncingDrive] = useState(false);
   const [scanResult, setScanResult] = useState<{type: 'success'|'error'|'not_found', message: string} | null>(null);
 
   useEffect(() => {
@@ -288,6 +289,33 @@ export default function ChatDetail() {
         setScanResult({ type: 'error', message: `❌ Gagal hapus: ${err.message}` });
     } finally {
         setIsDeletingMedia(false);
+    }
+  };
+
+  // ─── FITUR BARU: Manual Push ke Google Drive ────────────────────
+  const handleManualDriveSync = async () => {
+    if (selectedMedia.size === 0) return;
+
+    setIsSyncingDrive(true);
+    setScanResult(null);
+
+    try {
+        const res = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/drive-sync`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mediaIds: Array.from(selectedMedia) })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Gagal sinkronisasi Drive.');
+
+        setSelectedMedia(new Set()); // Kosongkan seleksi
+        setScanResult({ type: 'success', message: `✅ Berhasil memasukkan ${data.pushed} foto ke antrean Google Drive!` });
+    } catch (err: any) {
+        setScanResult({ type: 'error', message: `❌ ${err.message}` });
+        alert(err.message);
+    } finally {
+        setIsSyncingDrive(false);
     }
   };
 
@@ -577,6 +605,22 @@ export default function ChatDetail() {
                      <Trash2 size={16} />
                    )}
                    <span>{isDeletingMedia ? 'Menghapus...' : 'Hapus'}</span>
+                </button>
+             </div>
+
+             {/* Baris Aksi 2: Upload Drive Manual */}
+             <div className="flex gap-2">
+                <button 
+                   onClick={handleManualDriveSync}
+                   disabled={isSyncingDrive || selectedMedia.size === 0}
+                   className="flex-1 flex items-center justify-center space-x-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-300 text-white px-4 py-2.5 rounded-xl text-xs font-bold transition shadow-sm"
+                >
+                   {isSyncingDrive ? (
+                     <span className="w-4 h-4 border-2 border-white border-t-green-300 rounded-full animate-spin"></span>
+                   ) : (
+                     <Cloud size={16} />
+                   )}
+                   <span>{isSyncingDrive ? 'Mengantre...' : 'Antar ke Drive'}</span>
                 </button>
              </div>
 
