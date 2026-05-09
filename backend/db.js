@@ -68,6 +68,13 @@ db.exec(`
     );
 
     INSERT OR IGNORE INTO ai_config (id, is_enabled) VALUES (1, 1);
+
+    -- [OPTIMASI PERFORMA]
+    -- Index super cepat untuk mencegah Error 500 (Internal Server Error) saat data membesar
+    CREATE INDEX IF NOT EXISTS idx_media_customer_id ON media(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_messages_customer_id ON messages(customer_id);
+    CREATE INDEX IF NOT EXISTS idx_customers_created_at ON customers(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_customers_status ON customers(status);
 `);
 
 // ── [MIGRATION] Tambah kolom baru untuk fitur Spreadsheet Integration ──────────
