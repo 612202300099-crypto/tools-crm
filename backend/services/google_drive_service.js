@@ -418,7 +418,7 @@ async function processUploadQueue() {
                 OR c.id IS NULL
               )
             ORDER BY duq.created_at DESC
-            LIMIT 10
+            LIMIT 50
         `).all();
     } catch (e) {
         // Fallback jika kolom customers tidak cocok (e.g., kolom lama)
@@ -427,7 +427,7 @@ async function processUploadQueue() {
                 SELECT * FROM drive_upload_queue
                 WHERE status = 'PENDING' AND retry_count < max_retries
                 ORDER BY created_at DESC
-                LIMIT 10
+                LIMIT 50
             `).all();
         } catch (e2) {
             console.error('[DRIVE] ❌ Gagal query pending:', e2.message);
@@ -549,7 +549,7 @@ async function processUploadQueue() {
             console.log(`[DRIVE] ✅ [${item.id}] Upload SUKSES: ${item.product_abbr}/${item.resi}_${item.sku}/${baseName} (${photoStats?.uploaded || '?'}/${photoStats?.limit || '∞'})`);
 
             // Jeda antar upload (rate limit protection)
-            await sleep(1500);
+            await sleep(500);
 
         } catch (err) {
             // Handle errors with retry logic
