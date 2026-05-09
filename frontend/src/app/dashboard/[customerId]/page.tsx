@@ -51,8 +51,11 @@ export default function ChatDetail() {
   // Fitur Baru: Scan AI & Hapus Media
   const [isScanning, setIsScanning] = useState(false);
   const [isDeletingMedia, setIsDeletingMedia] = useState(false);
-  const [isSyncingDrive, setIsSyncingDrive] = useState(false);
   const [scanResult, setScanResult] = useState<{type: 'success'|'error'|'not_found', message: string} | null>(null);
+  const [isSyncingDrive, setIsSyncingDrive] = useState(false);
+  
+  // State untuk status sinkronisasi Drive dari backend
+  const [driveStatus, setDriveStatus] = useState<Record<string, string>>({});
 
   useEffect(() => {
     fetchData();
@@ -113,6 +116,22 @@ export default function ChatDetail() {
       return () => clearTimeout(timer);
     }
   }, [scanResult]);
+
+  // Polling Real-time Status Google Drive per 3 detik
+  useEffect(() => {
+    const fetchDriveStatus = async () => {
+        try {
+            const res = await apiClient.get(`/customers/${customerId}/drive-status`);
+            if (res.data) setDriveStatus(res.data);
+        } catch (err) {
+            // silent fail for polling
+        }
+    };
+
+    fetchDriveStatus();
+    const interval = setInterval(fetchDriveStatus, 3000);
+    return () => clearInterval(interval);
+  }, [customerId]);
 
   const fetchData = async () => {
     try {
@@ -308,11 +327,15 @@ export default function ChatDetail() {
         const data = res.data;
 
         setSelectedMedia(new Set()); // Kosongkan seleksi
-        setScanResult({ type: 'success', message: `✅ Berhasil memasukkan ${data.pushed} foto ke antrean Google Drive!` });
+        
+        let msg = `✅ Berhasil memasukkan ${data.pushed} foto ke antrean Google Drive!`;
+        if (data.skipped > 0) {
+            msg += ` (Sistem melewati ${data.skipped} foto karena sudah ada di Drive).`;
+        }
+        setScanResult({ type: 'success', message: msg });
     } catch (err: any) {
         const errMsg = err.response?.data?.error || err.message;
         setScanResult({ type: 'error', message: `❌ ${errMsg}` });
-        alert(errMsg);
     } finally {
         setIsSyncingDrive(false);
     }
@@ -345,7 +368,6 @@ export default function ChatDetail() {
       const zip = new JSZip();
       
       // [FIX] Anti-DDoS/Antivirus: Batch size diperkecil dan ada jeda (throttle)
-      // agar Windows Defender/Kaspersky tidak memblokir api.kirimfoto.com dengan ERR_CONNECTION_REFUSED
       const BATCH_SIZE = 2;
       let successCount = 0;
       let failCount = 0;
@@ -356,7 +378,6 @@ export default function ChatDetail() {
         
         const results = await Promise.allSettled(
           batch.map(async (item, batchIdx) => {
-            // [FIX] Timeout 30 detik per foto via AbortController
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 30000);
             try {
@@ -381,11 +402,9 @@ export default function ChatDetail() {
             successCount++;
           } else {
             failCount++;
-            console.warn('[ZIP] Foto gagal:', result.reason?.message);
           }
         }
 
-        // Jeda 500ms per batch untuk menghindari blokir firewall/antivirus lokal
         if (i + BATCH_SIZE < selectedItems.length) {
             await sleep(500);
         }
@@ -399,7 +418,7 @@ export default function ChatDetail() {
       saveAs(zipBlob, `${orderName}.zip`);
       
       if (failCount > 0) {
-        alert(`✅ ZIP berhasil! ${successCount} foto berhasil.\n⚠️ ${failCount} foto gagal (mungkin file tidak tersedia).`);
+        alert(`✅ ZIP berhasil! ${successCount} foto berhasil.\n⚠️ ${failCount} foto gagal.`);
       }
       
     } catch (error: any) {
@@ -546,8 +565,20 @@ export default function ChatDetail() {
                    >
                      {/* eslint-disable-next-line @next/next/no-img-element */}
                      <img src={media.file_url} className="w-full h-full object-cover transition transform duration-300 group-hover:scale-110" alt="Order file" loading="lazy" />
+                     
+                     {/* Indikator Status Drive */}
+                     {driveStatus[media.id] && (
+                       <div className="absolute top-2 left-2 z-10 flex items-center justify-center p-1.5 rounded-full bg-white/90 shadow-md backdrop-blur-sm border border-gray-100">
+                          {driveStatus[media.id] === 'DONE' && <CheckCircle size={14} className="text-green-500" />}
+                          {driveStatus[media.id] === 'UPLOADING' && <Cloud size={14} className="text-blue-500 animate-pulse" />}
+                          {(driveStatus[media.id] === 'PENDING' || driveStatus[media.id] === 'WAITING_RESI') && <span className="text-xs">⏳</span>}
+                          {driveStatus[media.id] === 'FAILED' && <span className="text-xs">❌</span>}
+                          {driveStatus[media.id] === 'SKIPPED' && <span className="text-xs">⏭️</span>}
+                       </div>
+                     )}
+
                      {isSelected && (
-                       <div className="absolute top-2 right-2 bg-indigo-500 text-white rounded-full p-1 shadow-lg ring-2 ring-white">
+                       <div className="absolute top-2 right-2 z-10 bg-indigo-500 text-white rounded-full p-1 shadow-lg ring-2 ring-white">
                          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
                        </div>
                      )}
