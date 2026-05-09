@@ -170,24 +170,46 @@ db.exec(`
 // Decoupled dari media queue: jika Drive down, media queue tetap jalan
 db.exec(`
     CREATE TABLE IF NOT EXISTS drive_upload_queue (
-        id           INTEGER PRIMARY KEY AUTOINCREMENT,
-        customer_id  TEXT NOT NULL,
-        media_id     TEXT,                          -- Referensi ke tabel media
-        file_url     TEXT NOT NULL,                 -- URL foto di Object Storage / local
-        storage_key  TEXT,                          -- Key di Object Storage
-        storage_type TEXT DEFAULT 'local',          -- 'object' atau 'local'
-        order_id     TEXT,
-        store_name   TEXT,
-        resi         TEXT,
-        product_abbr TEXT,                          -- POLAROID, GANCI, STIKERFOTO
-        sku          TEXT,                          -- SKU asli untuk penamaan folder
-        status       TEXT DEFAULT 'PENDING',        -- PENDING, UPLOADING, DONE, FAILED, WAITING_RESI
-        retry_count  INTEGER DEFAULT 0,
-        max_retries  INTEGER DEFAULT 5,
-        error_msg    TEXT,
-        drive_file_id TEXT,                         -- ID file di Google Drive setelah upload
-        created_at   TEXT DEFAULT (datetime('now'))
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        customer_id   TEXT NOT NULL,
+        media_id      TEXT,
+        file_url      TEXT NOT NULL,
+        storage_key   TEXT,
+        storage_type  TEXT DEFAULT 'local',
+        order_id      TEXT,
+        store_name    TEXT,
+        resi          TEXT,
+        product_abbr  TEXT,
+        sku           TEXT,
+        photo_index   INTEGER DEFAULT 1,
+        customer_phone TEXT,
+        status        TEXT DEFAULT 'PENDING',
+        retry_count   INTEGER DEFAULT 0,
+        max_retries   INTEGER DEFAULT 5,
+        error_msg     TEXT,
+        drive_file_id TEXT,
+        created_at    TEXT DEFAULT (datetime('now'))
     );
 `);
+
+// [MIGRATION] Tambah kolom baru ke tabel lama yang sudah ada di VPS
+// Kolom photo_index dan customer_phone ditambahkan di v2 — safe migration
+const driveQueueMigrations = [
+    { col: 'photo_index',    sql: `ALTER TABLE drive_upload_queue ADD COLUMN photo_index INTEGER DEFAULT 1` },
+    { col: 'customer_phone', sql: `ALTER TABLE drive_upload_queue ADD COLUMN customer_phone TEXT` },
+];
+for (const m of driveQueueMigrations) {
+    try {
+        // Cek apakah kolom sudah ada
+        const cols = db.prepare(`PRAGMA table_info(drive_upload_queue)`).all();
+        const exists = cols.some(c => c.name === m.col);
+        if (!exists) {
+            db.prepare(m.sql).run();
+            console.log(`[DB] ✅ Migration: kolom '${m.col}' ditambahkan ke drive_upload_queue`);
+        }
+    } catch (e) {
+        console.warn(`[DB] ⚠️ Migration '${m.col}' skip:`, e.message);
+    }
+}
 
 module.exports = db;
