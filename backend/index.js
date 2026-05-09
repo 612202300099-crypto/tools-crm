@@ -1,4 +1,4 @@
-﻿// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
+// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
 // BUKAN dari process.cwd() — karena PM2 bisa start dari folder mana saja.
 // Tanpa ini, jika PM2 start dari /root/ → .env di /root/tools-crm/backend/.env tidak terbaca!
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
@@ -95,6 +95,16 @@ async function safeDbCall(operation, label = 'DB_OP', retries = 3) {
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// --- DEBUG LOGGING MIDDLEWARE ---
+app.use((req, res, next) => {
+    if (req.url.includes('/login') || req.url.includes('/api/')) {
+        console.log(`[REQ] ${req.method} ${req.url} from ${req.headers.origin || 'unknown'} - Body:`, JSON.stringify(req.body).substring(0,100));
+    }
+    next();
+});
+// --------------------------------
+
 app.use('/api/local', localApiRouter);
 
 // Setup URL Publik untuk menayangkan Foto dari VPS
@@ -1045,8 +1055,12 @@ app.post('/api/wa/send', async (req, res) => {
     
     try {
         const chatId = phone_number + '@c.us';
-        // [FIX] Timeout ditingkatkan 30s → 45s agar tidak error saat WA lambat
-        await withTimeout(client.sendMessage(chatId, message), 45000, 'sendMessage_API');
+        // [FIX] Timeout ditingkatkan 30s → 45s dan DIBUNGKUS chromeSemaphore agar tidak hang
+        await withTimeout(
+            chromeSemaphore.acquire('API:sendMessage', () => client.sendMessage(chatId, message), { priority: 1, timeout: 45000 }), 
+            45000, 
+            'sendMessage_API'
+        );
 
         // [FIX] TIDAK perlu insert manual ke DB di sini!
         // Saat sendMessage berhasil, event 'message_create' otomatis terpicu
@@ -1096,11 +1110,15 @@ app.post('/api/wa/resync', async (req, res) => {
             }
 
             const chatId = phone_number + '@c.us';
-            const chat = await withTimeout(client.getChatById(chatId), 30000, 'getChatById_resync');
+            const chat = await withTimeout(
+                chromeSemaphore.acquire('API:resync_getChat', () => client.getChatById(chatId), { priority: 2, timeout: 30000 }), 
+                30000, 
+                'getChatById_resync'
+            );
 
             console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number}`);
             const historyMessages = await withTimeout(
-                chat.fetchMessages({ limit: 500 }),
+                chromeSemaphore.acquire('API:resync_fetchMsg', () => chat.fetchMessages({ limit: 500 }), { priority: 2, timeout: 120000 }),
                 120000,
                 'fetchMessages_resync'
             );
