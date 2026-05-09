@@ -99,6 +99,11 @@ function getDrive() {
 // Value: Google Drive folder ID
 const folderCache = new Map();
 
+// [BUG FIX] Mutex lock per folderPath — cegah race condition folder duplikat
+// Tanpa ini: 2 worker yang buat folder bersamaan → Drive punya 2 folder sama!
+// Dengan ini: worker ke-2 menunggu promise dari worker ke-1, lalu pakai hasil yang sama
+const _folderCreationLocks = new Map();
+
 function getDb() { return require('../db'); }
 
 function getCachedFolderId(folderPath) {
@@ -136,13 +141,35 @@ function saveFolderToCache(folderPath, driveId, parentId) {
 /**
  * Cari folder berdasarkan nama di parent tertentu.
  * Jika tidak ada, buat baru.
+ * [FIX] Menggunakan mutex lock per folderPath untuk mencegah race condition.
  * @returns {string} Google Drive folder ID
  */
 async function getOrCreateFolder(folderName, parentId, folderPath) {
-    // Check cache first
+    // 1. Cache check (fastest)
     const cached = getCachedFolderId(folderPath);
     if (cached) return cached;
 
+    // 2. Mutex: jika sedang dalam proses pembuatan, TUNGGU hasilnya (jangan buat baru)
+    if (_folderCreationLocks.has(folderPath)) {
+        return _folderCreationLocks.get(folderPath);
+    }
+
+    // 3. Buat promise dan lock dulu SEBELUM async operation
+    const promise = _doGetOrCreateFolder(folderName, parentId, folderPath);
+    _folderCreationLocks.set(folderPath, promise);
+
+    try {
+        const result = await promise;
+        return result;
+    } finally {
+        _folderCreationLocks.delete(folderPath);
+    }
+}
+
+/**
+ * Implementasi aktual get-or-create folder (dipanggil melalui mutex).
+ */
+async function _doGetOrCreateFolder(folderName, parentId, folderPath) {
     const drive = getDrive();
     if (!drive) throw new Error('Drive API tidak tersedia');
 
@@ -153,16 +180,19 @@ async function getOrCreateFolder(folderName, parentId, folderPath) {
             fields: 'files(id, name)',
             supportsAllDrives: true,
             includeItemsFromAllDrives: true,
-            corpora: 'allDrives',   // [FIX] Wajib untuk Shared Drive
+            corpora: 'allDrives',
         });
 
         if (searchRes.data.files && searchRes.data.files.length > 0) {
+            // [FIX] Jika ada beberapa folder duplikat, gunakan yang pertama
+            if (searchRes.data.files.length > 1) {
+                console.warn(`[DRIVE] ⚠️ Ditemukan ${searchRes.data.files.length} folder duplikat "${folderName}" — menggunakan yang pertama.`);
+            }
             const folderId = searchRes.data.files[0].id;
             saveFolderToCache(folderPath, folderId, parentId);
             return folderId;
         }
     } catch (searchErr) {
-        // Search failed — try creating anyway
         console.warn(`[DRIVE] ⚠️ Search gagal untuk "${folderName}":`, searchErr.message);
     }
 
@@ -268,6 +298,7 @@ function queueUpload(params) {
     const {
         customerId, mediaId, fileUrl, storageKey, storageType,
         orderId, storeName, resi, productAbbr, sku,
+        photoIndex, customerPhone,
     } = params;
 
     try {
@@ -275,16 +306,43 @@ function queueUpload(params) {
         db.prepare(`
             INSERT INTO drive_upload_queue
                 (customer_id, media_id, file_url, storage_key, storage_type,
-                 order_id, store_name, resi, product_abbr, sku, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 order_id, store_name, resi, product_abbr, sku,
+                 photo_index, customer_phone, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             customerId, mediaId || null, fileUrl, storageKey || null, storageType || 'local',
             orderId || null, storeName || null, resi || null, productAbbr || 'LAINNYA', sku || null,
-            resi ? 'PENDING' : 'WAITING_RESI'  // Jika resi belum ada, tunggu dulu
+            photoIndex || 1, customerPhone || null,
+            resi ? 'PENDING' : 'WAITING_RESI'
         );
-        console.log(`[DRIVE] 📥 Queued upload: ${storageKey || fileUrl} (${productAbbr}, resi: ${resi || 'belum ada'})`);
+        console.log(`[DRIVE] 📥 Queued: ${productAbbr} foto-${photoIndex} | resi: ${resi || 'WAITING'} | ${storageKey || fileUrl}`);
     } catch (e) {
-        console.error('[DRIVE] ❌ Gagal queue upload:', e.message);
+        // Jika kolom photo_index/customer_phone belum ada di tabel lama, fallback
+        if (e.message && e.message.includes('no column')) {
+            try {
+                const db = getDb();
+                db.prepare(`ALTER TABLE drive_upload_queue ADD COLUMN photo_index INTEGER DEFAULT 1`).run();
+                db.prepare(`ALTER TABLE drive_upload_queue ADD COLUMN customer_phone TEXT`).run();
+                // Retry
+                db.prepare(`
+                    INSERT INTO drive_upload_queue
+                        (customer_id, media_id, file_url, storage_key, storage_type,
+                         order_id, store_name, resi, product_abbr, sku,
+                         photo_index, customer_phone, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                `).run(
+                    customerId, mediaId || null, fileUrl, storageKey || null, storageType || 'local',
+                    orderId || null, storeName || null, resi || null, productAbbr || 'LAINNYA', sku || null,
+                    photoIndex || 1, customerPhone || null,
+                    resi ? 'PENDING' : 'WAITING_RESI'
+                );
+                console.log(`[DRIVE] 📥 Queued (after schema upgrade): ${storageKey || fileUrl}`);
+            } catch (retryErr) {
+                console.error('[DRIVE] ❌ Gagal queue upload (retry):', retryErr.message);
+            }
+        } else {
+            console.error('[DRIVE] ❌ Gagal queue upload:', e.message);
+        }
     }
 }
 
@@ -404,9 +462,12 @@ async function processUploadQueue() {
 
             await sleep(500);
 
-            // 3. Upload file ke Shared Drive
-            const baseName = (item.storage_key || item.file_url).split('/').pop();
-            console.log(`[DRIVE] ⬆️ [${item.id}] Uploading ${baseName} (${Math.round(buffer.length / 1024)}KB) ke folder ${folderId}...`);
+            // 3. Upload file ke Drive
+            // [FIX] Nama file informatif: {phone}_{urutan}.jpg bukan foto-randomhex.jpg
+            const phone = (item.customer_phone || item.customer_id || 'unknown').replace(/[^0-9a-zA-Z]/g, '');
+            const idx = item.photo_index || 1;
+            const baseName = `${phone}_foto${String(idx).padStart(2, '0')}.jpg`;
+            console.log(`[DRIVE] ⬆️ [${item.id}] Uploading ${baseName} (${Math.round(buffer.length / 1024)}KB)...`);
             const { fileId } = await uploadFile(
                 buffer,
                 baseName,

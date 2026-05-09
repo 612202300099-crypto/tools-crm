@@ -1,4 +1,4 @@
-// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
+﻿// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
 // BUKAN dari process.cwd() — karena PM2 bisa start dari folder mana saja.
 // Tanpa ini, jika PM2 start dari /root/ → .env di /root/tools-crm/backend/.env tidak terbaca!
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
@@ -457,21 +457,34 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         }
 
         if (isDuplicate) {
-            if (!message.hasMedia) return; 
-            
-            // HEALING MODE
+            if (!message.hasMedia) return;
+
+            // ── HEALING MODE: pesan sudah di DB tapi media belum tersimpan ──
+            // Cek apakah media sudah ada (mungkin sebelumnya sukses)
             const { data: secureMedia } = await safeDbCall(
                 () => supabase.from('media').select('id').eq('message_id', messageRecord.id).limit(1),
                 'checkMediaHealing'
             );
-            
+
             if (secureMedia && secureMedia.length > 0) {
-                 return; 
+                // Media sudah ada di DB — jangan proses ulang
+                return;
             }
-            console.log(`🩹 HEALING: Menambal media yang hilang untuk pesan ${waMessageId}`);
-        } else {
-            try {
-                const { data: msgData } = await safeDbCall(
+
+            // Media BELUM ada → antri dengan PRIORITAS TINGGI
+            // [FIX] isPriority=true: langsung ke depan antrian
+            // [FIX] Bypass Disk Guard: healing tidak perlu cek disk (foto sudah seharusnya masuk)
+            console.log(`🩹 HEALING: Re-antri media ${waMessageId} untuk customer ${customerPhoneNumber}`);
+            if (customer && customer.id) {
+                mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, true);
+            }
+            return; // [FIX KRITIS] STOP di sini — jangan jatuh ke blok if(message.hasMedia) di bawah
+        }
+
+
+        // Pesan BARU (bukan duplikat) — insert ke DB
+        try {
+            const { data: msgData } = await safeDbCall(
                     () => supabase.from('messages').insert({
                         customer_id: customer.id,
                         wa_id: waMessageId,
@@ -485,9 +498,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                 messageRecord = msgData;
             } catch (msgError) {
                 console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message);
-            }
+            console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message);
         }
-
         if (message.hasMedia) {
             if (!isFromMe) {
                 // [DISK GUARD v2] Cek apakah media bisa diterima

@@ -397,44 +397,49 @@ class MediaQueueService {
                 this.dbTimeout, 'updateCustomerDB'
             );
 
-            // 7. [v2] Queue upload ke Google Drive (non-blocking)
-            // Decoupled: jika Drive error, foto tetap aman di Object Storage
+            // 7. Queue upload ke Google Drive (non-blocking, decoupled)
+            // [FIX v3] SELALU queue ke Drive meski order_id/resi belum ada.
+            // Foto tanpa resi -> WAITING_RESI, diupgrade otomatis saat resi tersedia.
             try {
                 const driveService = require('./google_drive_service');
-                // Ambil data customer untuk info toko, resi, produk
                 const { data: custData } = await this.withTimeout(
                     this.supabase.from('customers').select('order_id, store_name, resi, order_detail').eq('id', job.customerId).single(),
                     this.dbTimeout, 'getCustomerForDrive'
                 );
 
-                if (custData && custData.order_id) {
-                    // Parse order_detail untuk ambil productAbbr dan sku
-                    let productAbbr = 'LAINNYA';
-                    let sku = '';
-                    try {
-                        const detail = JSON.parse(custData.order_detail || '[]');
-                        const mainItem = detail.find(i => i.isPolaroid) || detail[0];
-                        if (mainItem) {
-                            productAbbr = mainItem.productAbbr || 'LAINNYA';
-                            sku = mainItem.sku || '';
-                        }
-                    } catch (e) { /* silent */ }
+                // Parse order_detail untuk productAbbr dan sku
+                let productAbbr = 'LAINNYA';
+                let sku = '';
+                try {
+                    const detail = JSON.parse((custData && custData.order_detail) || '[]');
+                    const mainItem = detail.find(i => i.isPolaroid) || detail[0];
+                    if (mainItem) { productAbbr = mainItem.productAbbr || 'LAINNYA'; sku = mainItem.sku || ''; }
+                } catch (e) {}
 
-                    driveService.queueUpload({
-                        customerId: job.customerId,
-                        mediaId: msgRecord.id,
-                        fileUrl: publicUrl,
-                        storageKey,
-                        storageType,
-                        orderId: custData.order_id,
-                        storeName: custData.store_name,
-                        resi: custData.resi,
-                        productAbbr,
-                        sku,
-                    });
-                }
+                // Hitung nomor urut foto untuk nama file informatif di Drive
+                let photoIndex = 1;
+                try {
+                    const { data: prevMedia } = await this.supabase
+                        .from('media').select('id').eq('customer_id', job.customerId);
+                    photoIndex = prevMedia ? prevMedia.length : 1;
+                } catch (e) {}
+
+                // [FIX] Tidak ada lagi guard `if (custData.order_id)` — queue SELALU
+                driveService.queueUpload({
+                    customerId:    job.customerId,
+                    mediaId:       msgRecord.id,
+                    fileUrl:       publicUrl,
+                    storageKey,
+                    storageType,
+                    orderId:       custData ? custData.order_id : null,
+                    storeName:     custData ? custData.store_name : null,
+                    resi:          custData ? custData.resi : null,
+                    productAbbr,
+                    sku,
+                    photoIndex,
+                    customerPhone: job.customerPhone,
+                });
             } catch (driveErr) {
-                // Drive queue error TIDAK boleh menggagalkan media processing
                 console.warn(`[W-${workerId}] ⚠️ Drive queue skip: ${driveErr.message.substring(0, 60)}`);
             }
 
