@@ -417,7 +417,7 @@ async function processUploadQueue() {
                 OR c.status = 'SUDAH_KIRIM_FOTO'
                 OR c.id IS NULL
               )
-            ORDER BY duq.created_at ASC
+            ORDER BY duq.created_at DESC
             LIMIT 10
         `).all();
     } catch (e) {
@@ -426,7 +426,7 @@ async function processUploadQueue() {
             pendingItems = db.prepare(`
                 SELECT * FROM drive_upload_queue
                 WHERE status = 'PENDING' AND retry_count < max_retries
-                ORDER BY created_at ASC
+                ORDER BY created_at DESC
                 LIMIT 10
             `).all();
         } catch (e2) {
