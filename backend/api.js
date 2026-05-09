@@ -142,7 +142,9 @@ router.get('/customers/:id/media', authenticateToken, (req, res) => {
     }
 });
 
-router.post('/customers/:id/drive-sync', authenticateToken, (req, res) => {
+const { lookupOrder } = require('./services/spreadsheet_service');
+
+router.post('/customers/:id/drive-sync', authenticateToken, async (req, res) => {
     try {
         const { mediaIds } = req.body;
         if (!mediaIds || !Array.isArray(mediaIds) || mediaIds.length === 0) {
@@ -152,24 +154,45 @@ router.post('/customers/:id/drive-sync', authenticateToken, (req, res) => {
         const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
         if (!customer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
         
-        // Fallback: Jika resi resmi belum ada, gunakan order_id (input manual / hasil scan)
-        const finalResi = customer.resi || customer.order_id;
-        
-        if (!finalResi) {
-            return res.status(400).json({ error: 'Gagal: Customer ini belum memiliki nomor pesanan (resi/order_id)' });
+        if (!customer.order_id) {
+            return res.status(400).json({ error: 'Gagal: Customer ini belum memiliki Nomor Order (Scan ID atau ketik manual terlebih dahulu)' });
         }
 
-        // Parse detail pesanan untuk mendapatkan productAbbr dan sku
+        let finalResi = customer.resi;
+        let finalStoreName = customer.store_name;
         let productAbbr = 'LAINNYA';
         let sku = '';
-        try {
-            const detail = JSON.parse(customer.order_detail || '[]');
-            const mainItem = detail.find(i => i.isPolaroid) || detail[0];
+
+        // 1. Cek Spreadsheet Terlebih Dahulu secara langsung (Bypass Cache)
+        const lookup = await lookupOrder(customer.order_id, { bypassCache: true });
+        
+        if (lookup && lookup.found) {
+            finalResi = lookup.resi || customer.order_id;
+            finalStoreName = lookup.storeName;
+            
+            // Simpan detail terbaru dari spreadsheet ke tabel customers
+            db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
+              .run(finalResi, finalStoreName, JSON.stringify(lookup.items), customer.id);
+
+            const mainItem = lookup.items.find(i => i.isPolaroid) || lookup.items[0];
             if (mainItem) {
                 productAbbr = mainItem.productAbbr || 'LAINNYA';
                 sku = mainItem.sku || '';
             }
-        } catch (e) { /* silent */ }
+        } else {
+            // Jika tidak ditemukan di spreadsheet, gunakan order_id sebagai fallback darurat
+            finalResi = customer.resi || customer.order_id;
+            
+            // Parsing order_detail lama jika ada
+            try {
+                const detail = JSON.parse(customer.order_detail || '[]');
+                const mainItem = detail.find(i => i.isPolaroid) || detail[0];
+                if (mainItem) {
+                    productAbbr = mainItem.productAbbr || 'LAINNYA';
+                    sku = mainItem.sku || '';
+                }
+            } catch (e) { /* silent */ }
+        }
 
         let pushed = 0;
         const insertStmt = db.prepare(`
@@ -197,13 +220,13 @@ router.post('/customers/:id/drive-sync', authenticateToken, (req, res) => {
                 
                 if (existing) {
                     // Update status jadi PENDING untuk memaksa retry
-                    updateStmt.run(finalResi, customer.store_name, productAbbr, sku, media.id);
+                    updateStmt.run(finalResi, finalStoreName, productAbbr, sku, media.id);
                     pushed++;
                 } else {
                     // Insert baru. Karena manual, kita beri photoIndex fallback misal ID media
                     insertStmt.run(
                         customer.id, media.id, media.file_url, media.storage_key, media.storage_type,
-                        customer.order_id || null, customer.store_name || null, finalResi, productAbbr, sku,
+                        customer.order_id || null, finalStoreName || null, finalResi, productAbbr, sku,
                         media.id, customer.phone_number, 'PENDING'
                     );
                     pushed++;
