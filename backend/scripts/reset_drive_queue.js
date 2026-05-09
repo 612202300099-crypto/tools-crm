@@ -7,20 +7,10 @@ async function main() {
     console.log('🚀 MEMULAI PROSES RESET SINKRONISASI GOOGLE DRIVE');
     console.log('================================================================\n');
 
-    // 1. Kalkulasi Threshold Waktu
-    // "Kemarin mulai dari jam 12 siang" (Waktu Lokal / WIB)
-    const now = new Date();
-    const thresholdDate = new Date(now);
-    thresholdDate.setDate(now.getDate() - 1); // Kemarin
-    thresholdDate.setHours(12, 0, 0, 0); // Jam 12:00:00 lokal
-
-    // Karena SQLite menyimpan waktu dalam UTC, kita gunakan toISOString() 
-    // agar perbandingan berjalan persis sama dengan SQLite CURRENT_TIMESTAMP.
-    const thresholdUTC = thresholdDate.toISOString();
+    // 1. Kalkulasi Threshold Waktu: KITA AMBIL DARI AWAL WAKTU!
+    const thresholdUTC = '2000-01-01T00:00:00.000Z';
     
-    console.log(`⏰ Filter Waktu Aktif:`);
-    console.log(`   - Waktu Lokal (WIB) : ${thresholdDate.toLocaleString('id-ID')}`);
-    console.log(`   - Waktu UTC Basis   : ${thresholdUTC}\n`);
+    console.log(`⏰ Filter Waktu Aktif: SEMUA DATA DARI AWAL`);
 
     try {
         // 2. Bersihkan Antrean Lama (Mulai dari Nol)
@@ -30,8 +20,8 @@ async function main() {
         db.prepare(`DELETE FROM sqlite_sequence WHERE name='drive_upload_queue'`).run();
         console.log(`✅ Antrean lama berhasil dimusnahkan!\n`);
 
-        // 3. Tarik data Media yang valid berdasarkan filter waktu
-        console.log(`🔍 Menyisir foto pelanggan setelah ${thresholdDate.toLocaleString('id-ID')}...`);
+        // 3. Tarik data Media
+        console.log(`🔍 Menyisir SEMUA foto pelanggan dari database...`);
         
         // Tarik data dengan JOIN untuk mendapatkan info lengkap
         const query = `
@@ -41,6 +31,7 @@ async function main() {
                 m.file_url,
                 m.storage_key,
                 m.storage_type,
+                m.file_name,
                 m.created_at,
                 c.phone_number,
                 c.resi,
@@ -52,15 +43,35 @@ async function main() {
             ORDER BY m.customer_id ASC, m.created_at ASC
         `;
         
-        const validMedia = db.prepare(query).all(thresholdUTC);
+        const allMedia = db.prepare(query).all(thresholdUTC);
         
-        if (validMedia.length === 0) {
-            console.log(`⚠️ Tidak ada foto satupun yang ditemukan setelah batas waktu tersebut.`);
-            console.log(`================================================================`);
-            return;
+        // Filter cerdas: Skip foto abu-abu (file fisik hilang)
+        const fs = require('fs');
+        const UPLOADS_DIR = path.join(__dirname, '..', 'uploads');
+        let validMedia = [];
+        let skippedMissing = 0;
+
+        for (const item of allMedia) {
+            // Jika foto ada di S3, pasti aman.
+            if (item.storage_type === 'object') {
+                validMedia.push(item);
+                continue;
+            }
+            
+            // Jika foto berstatus local, kita harus cek fisik file-nya
+            const localPath = path.join(UPLOADS_DIR, item.file_name || '');
+            if (fs.existsSync(localPath)) {
+                validMedia.push(item);
+            } else {
+                skippedMissing++; // Foto gaib (abu-abu)
+            }
         }
 
-        console.log(`📸 Berhasil menyaring ${validMedia.length} foto valid untuk disinkronkan.\n`);
+        console.log(`📸 Menyaring ${allMedia.length} foto...`);
+        console.log(`🗑️ DIBUANG: ${skippedMissing} foto gaib (abu-abu) yang hilang saat pindah VPS.`);
+        console.log(`✅ TERSISA: ${validMedia.length} foto valid untuk disinkronkan ke Drive.\n`);
+        
+        if (validMedia.length === 0) return;
         
         // 4. Memproses dan Menyuntikkan Ulang ke Queue
         const insertStmt = db.prepare(`
