@@ -152,8 +152,11 @@ router.post('/customers/:id/drive-sync', authenticateToken, (req, res) => {
         const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
         if (!customer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
         
-        if (!customer.resi) {
-            return res.status(400).json({ error: 'Gagal: Customer ini belum memiliki nomor pesanan (resi)' });
+        // Fallback: Jika resi resmi belum ada, gunakan order_id (input manual / hasil scan)
+        const finalResi = customer.resi || customer.order_id;
+        
+        if (!finalResi) {
+            return res.status(400).json({ error: 'Gagal: Customer ini belum memiliki nomor pesanan (resi/order_id)' });
         }
 
         // Parse detail pesanan untuk mendapatkan productAbbr dan sku
@@ -194,13 +197,13 @@ router.post('/customers/:id/drive-sync', authenticateToken, (req, res) => {
                 
                 if (existing) {
                     // Update status jadi PENDING untuk memaksa retry
-                    updateStmt.run(customer.resi, customer.store_name, productAbbr, sku, media.id);
+                    updateStmt.run(finalResi, customer.store_name, productAbbr, sku, media.id);
                     pushed++;
                 } else {
                     // Insert baru. Karena manual, kita beri photoIndex fallback misal ID media
                     insertStmt.run(
                         customer.id, media.id, media.file_url, media.storage_key, media.storage_type,
-                        customer.order_id || null, customer.store_name || null, customer.resi, productAbbr, sku,
+                        customer.order_id || null, customer.store_name || null, finalResi, productAbbr, sku,
                         media.id, customer.phone_number, 'PENDING'
                     );
                     pushed++;
