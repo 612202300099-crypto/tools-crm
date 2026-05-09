@@ -300,20 +300,19 @@ export default function ChatDetail() {
     setScanResult(null);
 
     try {
-        const res = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/drive-sync`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mediaIds: Array.from(selectedMedia) })
+        const res = await apiClient.post(`/customers/${customerId}/drive-sync`, { 
+            mediaIds: Array.from(selectedMedia) 
         });
 
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || 'Gagal sinkronisasi Drive.');
+        // apiClient otomatis throw error jika res.data tidak ada atau HTTP error
+        const data = res.data;
 
         setSelectedMedia(new Set()); // Kosongkan seleksi
         setScanResult({ type: 'success', message: `✅ Berhasil memasukkan ${data.pushed} foto ke antrean Google Drive!` });
     } catch (err: any) {
-        setScanResult({ type: 'error', message: `❌ ${err.message}` });
-        alert(err.message);
+        const errMsg = err.response?.data?.error || err.message;
+        setScanResult({ type: 'error', message: `❌ ${errMsg}` });
+        alert(errMsg);
     } finally {
         setIsSyncingDrive(false);
     }
