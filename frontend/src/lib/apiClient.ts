@@ -2,7 +2,7 @@ import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
 
 // Hardcoded for Local VPS Development since we want to drop Supabase completely
-export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api-wa.parecustom.com';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'https://api.kirimfoto.com';
 
 const apiClient = axios.create({
     baseURL: `${API_BASE_URL}/api/local`,
