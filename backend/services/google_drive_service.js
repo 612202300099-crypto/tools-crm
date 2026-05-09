@@ -489,10 +489,10 @@ async function processUploadQueue() {
                 console.log(`[DRIVE] ✅ [${item.id}] Download OK: ${Math.round(buffer.length / 1024)}KB`);
             } else {
                 // Baca dari disk lokal
-                // file_url bisa berupa: https://api-wa.parecustom.com/uploads/xxx/foto.jpg
+                // file_url bisa berupa: https://api.kirimfoto.com/uploads/xxx/foto.jpg
                 // atau path relatif: uploads/xxx/foto.jpg
                 let localPath;
-                const publicUrl = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com';
+                const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
                 if (item.file_url && item.file_url.startsWith(publicUrl)) {
                     // URL publik → convert ke path lokal
                     const relativePath = item.file_url.replace(publicUrl, '').replace(/^\//, '');

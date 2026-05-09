@@ -108,7 +108,7 @@ app.use((req, res, next) => {
 app.use('/api/local', localApiRouter);
 
 // Setup URL Publik untuk menayangkan Foto dari VPS
-const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com';
+const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
 
 // Servis file static dari VPS
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));

@@ -164,7 +164,7 @@ async function uploadMedia(buffer, fileName, mimeType = 'image/jpeg', retries = 
  * Simpan ke disk lokal (fallback) — memastikan foto customer tidak pernah hilang.
  */
 async function saveToLocalDisk(buffer, fileName) {
-    const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api-wa.parecustom.com';
+    const PUBLIC_API_URL = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
     const uploadsDir     = path.join(__dirname, '..', 'uploads', path.dirname(fileName));
     const filePath       = path.join(__dirname, '..', 'uploads', fileName);
 

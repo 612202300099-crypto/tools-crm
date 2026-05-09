@@ -51,7 +51,7 @@ class MediaQueueService {
     constructor(client, supabase, options = {}) {
         this.client = client;
         this.supabase = supabase;
-        this.PUBLIC_API_URL = options.publicUrl || 'https://api-wa.parecustom.com';
+        this.PUBLIC_API_URL = options.publicUrl || 'https://api.kirimfoto.com';
         this.queueFile = path.join(__dirname, '../media_queue_state.json');
         
         // Konfigurasi Performa v5 — configurable via .env

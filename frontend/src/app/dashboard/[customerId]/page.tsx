@@ -317,11 +317,12 @@ export default function ChatDetail() {
       const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
       const zip = new JSZip();
       
-      // [FIX] Parallel download 5 foto sekaligus (bukan serial 1-per-1)
-      // Promise.allSettled: 1 foto gagal tidak batalkan yang lain
-      const BATCH_SIZE = 5;
+      // [FIX] Anti-DDoS/Antivirus: Batch size diperkecil dan ada jeda (throttle)
+      // agar Windows Defender/Kaspersky tidak memblokir api.kirimfoto.com dengan ERR_CONNECTION_REFUSED
+      const BATCH_SIZE = 2;
       let successCount = 0;
       let failCount = 0;
+      const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
       
       for (let i = 0; i < selectedItems.length; i += BATCH_SIZE) {
         const batch = selectedItems.slice(i, i + BATCH_SIZE);
@@ -355,6 +356,11 @@ export default function ChatDetail() {
             failCount++;
             console.warn('[ZIP] Foto gagal:', result.reason?.message);
           }
+        }
+
+        // Jeda 500ms per batch untuk menghindari blokir firewall/antivirus lokal
+        if (i + BATCH_SIZE < selectedItems.length) {
+            await sleep(500);
         }
       }
       
