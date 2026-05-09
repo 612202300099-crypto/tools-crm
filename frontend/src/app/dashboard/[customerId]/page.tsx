@@ -296,32 +296,68 @@ export default function ChatDetail() {
     try {
       const selectedItems = mediaList.filter(m => selectedMedia.has(m.id));
       const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
-
       const zip = new JSZip();
-      let count = 0;
       
-      for (const item of selectedItems) {
-        // [FIX] Gunakan proxy backend agar tidak kena CORS dari Object Storage
-        const proxyUrl = `${WA_API_URL}/api/media/proxy/${item.id}`;
-        const res = await fetch(proxyUrl);
-        if (!res.ok) throw new Error(`Gagal download foto ${count + 1}`);
-        const blob = await res.blob();
-        const ext = item.file_url.split('.').pop() || 'jpg';
-        zip.file(`foto_${++count}.${ext}`, blob);
+      // [FIX] Parallel download 5 foto sekaligus (bukan serial 1-per-1)
+      // Promise.allSettled: 1 foto gagal tidak batalkan yang lain
+      const BATCH_SIZE = 5;
+      let successCount = 0;
+      let failCount = 0;
+      
+      for (let i = 0; i < selectedItems.length; i += BATCH_SIZE) {
+        const batch = selectedItems.slice(i, i + BATCH_SIZE);
+        
+        const results = await Promise.allSettled(
+          batch.map(async (item, batchIdx) => {
+            // [FIX] Timeout 30 detik per foto via AbortController
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 30000);
+            try {
+              const proxyUrl = `${WA_API_URL}/api/media/proxy/${item.id}`;
+              const res = await fetch(proxyUrl, { signal: controller.signal });
+              clearTimeout(timeoutId);
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              const blob = await res.blob();
+              const ext = item.file_url.split('.').pop()?.split('?')[0] || 'jpg';
+              return { blob, ext, globalIdx: i + batchIdx };
+            } catch (e) {
+              clearTimeout(timeoutId);
+              throw e;
+            }
+          })
+        );
+        
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            const { blob, ext, globalIdx } = result.value;
+            zip.file(`foto_${globalIdx + 1}.${ext}`, blob);
+            successCount++;
+          } else {
+            failCount++;
+            console.warn('[ZIP] Foto gagal:', result.reason?.message);
+          }
+        }
       }
-
+      
+      if (successCount === 0) {
+        throw new Error(`Semua ${selectedItems.length} foto gagal didownload. Coba refresh halaman.`);
+      }
+      
       const zipBlob = await zip.generateAsync({ type: "blob" });
-      const zipFileName = `${orderName}.zip`;
+      saveAs(zipBlob, `${orderName}.zip`);
       
-      saveAs(zipBlob, zipFileName);
+      if (failCount > 0) {
+        alert(`✅ ZIP berhasil! ${successCount} foto berhasil.\n⚠️ ${failCount} foto gagal (mungkin file tidak tersedia).`);
+      }
       
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      alert("Gagal mendownload dan memproses file ZIP. Coba refresh halaman dan ulangi.");
+      alert(`Gagal membuat ZIP: ${error.message}`);
     } finally {
       setLoadingMedia(false);
     }
   };
+
 
   const sendQuickReply = async (templateText?: string) => {
     const textToSend = templateText || replyText;
