@@ -152,23 +152,41 @@ export default function ChatDetail() {
     
     setIsResyncing(true);
     try {
-        const res = await fetch(`${WA_API_URL}/api/wa/resync`, {
-           method: 'POST',
-           headers: { 'Content-Type': 'application/json' },
-           body: JSON.stringify({ 
-               phone_number: customer.phone_number, 
-               customer_id: customer.id
-           })
-        });
+        // Timeout 15 detik agar tidak hang jika server tidak respons
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+        let res: Response;
+        try {
+            res = await fetch(`${WA_API_URL}/api/wa/resync`, {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify({ 
+                   phone_number: customer.phone_number, 
+                   customer_id: customer.id
+               }),
+               signal: controller.signal,
+            });
+            clearTimeout(timeoutId);
+        } catch (networkErr: any) {
+            clearTimeout(timeoutId);
+            // Network error (server mati, CORS, timeout) — tampilkan pesan ramah
+            const isTimeout = networkErr.name === 'AbortError';
+            alert(isTimeout 
+                ? "⚠️ Server tidak merespons dalam 15 detik. Kemungkinan sedang memulai ulang. Tunggu 1-2 menit lalu coba lagi."
+                : "⚠️ Tidak bisa terhubung ke server. Pastikan VPS menyala dan coba lagi."
+            );
+            return;
+        }
 
         if (!res.ok) {
            const errData = await res.json().catch(() => ({}));
-           throw new Error(errData.error || `HTTP Error ${res.status}`);
+           // Tampilkan error dari server tapi jangan panic
+           alert(`⚠️ ${errData.error || 'Gali Ulang gagal. Coba lagi dalam beberapa menit.'}`);
+           return;
         }
         
-        alert("Gali Ulang SUKSES! Halaman ini akan disegarkan ulang otomatis untuk menampilkan foto murni dari WA.");
-        setMessages([]);
-        setMediaList([]);
+        alert("✅ Gali Ulang dimulai! Foto & pesan akan muncul otomatis dalam beberapa menit.");
         fetchData();
     } catch (err: any) {
         alert("Gagal melakukan Gali Ulang. Detail: " + err.message);
@@ -176,6 +194,7 @@ export default function ChatDetail() {
         setIsResyncing(false);
     }
   };
+
 
   const handleDeleteChat = async () => {
     const confirmAsk = window.confirm("PERINGATAN KERAS! Anda yakin akan menghapus permanen riwayat pelanggan ini?\n\n- Seluruh Folder File di VPS akan dihapus bersih.\n- Seluruh riwayat DB (customer, pesan, foto) tuntas dilebur.\nLanjutkan?");
