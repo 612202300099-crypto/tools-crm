@@ -99,7 +99,7 @@ app.use(express.json());
 // --- DEBUG LOGGING MIDDLEWARE ---
 app.use((req, res, next) => {
     if (req.url.includes('/login') || req.url.includes('/api/')) {
-        console.log(`[REQ] ${req.method} ${req.url} from ${req.headers.origin || 'unknown'} - Body:`, JSON.stringify(req.body).substring(0,100));
+        console.log(`[REQ] ${req.method} ${req.url} from ${req.headers.origin || 'unknown'} - Body:`, req.body ? JSON.stringify(req.body).substring(0,100) : 'none');
     }
     next();
 });
