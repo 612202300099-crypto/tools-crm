@@ -1,4 +1,4 @@
-// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
+﻿// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
 // BUKAN dari process.cwd() — karena PM2 bisa start dari folder mana saja.
 // Tanpa ini, jika PM2 start dari /root/ → .env di /root/tools-crm/backend/.env tidak terbaca!
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
@@ -608,34 +608,27 @@ client.on('ready', async () => {
         for (const chat of chats) {
             if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
 
-            try {
-                // [FIX] Jeda 500ms (dari 1500ms) — lebih cepat, Chrome semaphore sudah proteksi
-                await sleep(500);
+            // [OPT] Skip chat tanpa lastMessage atau pesan sudah lama — sebelum buka Chrome
+            if (!chat.lastMessage || chat.lastMessage.timestamp < limitTimestamp) {
+                skippedCount++;
+                continue;
+            }
 
-                // [FIX] Kirim heartbeat per chat — reset consecutiveFailures
-                // Mencegah Watchdog hitung kegagalan getState() saat Chrome sibuk sync
+            try {
+                // Heartbeat per chat — reset Watchdog consecutiveFailures
                 stability.heartbeat();
 
-                // Skip chat yang pesan terakhirnya sudah lama
-                if (chat.lastMessage && chat.lastMessage.timestamp < limitTimestamp) {
-                    skippedCount++;
-                    continue;
-                }
-
-                // [FIX] Timeout 45s (dari 30s) — beberapa chat lambat load
-                // Tangkap semua jenis error timeout dengan graceful skip
+                // [OPT] Limit 30 (dari 50) — cukup untuk healing, tidak overload Chrome
                 let historyMessages = [];
                 try {
-                    // [CHROME-SEM] Startup sync = priority 2, antri di belakang incoming
                     historyMessages = await chromeSemaphore.acquire('SYNC:fetchMessages', () => {
                         return withTimeout(
-                            chat.fetchMessages({ limit: 50 }),
+                            chat.fetchMessages({ limit: 30 }),
                             45000,
                             'fetchMessages_startup'
                         );
                     }, { priority: 2, timeout: 90000 });
                 } catch (fetchErr) {
-                    // Skip chat ini, tapi jangan gagalkan seluruh sync
                     console.warn(`[SYNC] ⚠️ Skip chat ${chat.id.user}: ${fetchErr.message.substring(0, 60)}`);
                     errorCount++;
                     continue;
@@ -646,6 +639,12 @@ client.on('ready', async () => {
                         processedCount++;
                         await processMessageCommand(msg, true);
                     }
+                }
+
+                // Log progress setiap 50 chat aktif
+                const totalDone = processedCount + skippedCount + errorCount;
+                if (totalDone > 0 && totalDone % 50 === 0) {
+                    console.log(`[SYNC] 📊 Progress: ${totalDone}/${chats.length} | Pesan: ${processedCount} | Skip: ${skippedCount} | Err: ${errorCount}`);
                 }
             } catch (chatErr) {
                 errorCount++;
@@ -1429,6 +1428,11 @@ server.listen(PORT, '0.0.0.0', () => {
     // sistem akan retry otomatis sampai 6x (30 menit total).
     cron.schedule('*/5 * * * *', async () => {
         if (!isConnected) return; // Jangan proses jika WA belum konek
+        // [FIX] Jangan proses saat startup sync — Chrome penuh, sendMessage akan timeout
+        if (stability.isBusy()) {
+            console.log('[PENDING-ORDER] ⏳ Sistem BUSY (startup sync) — pending order ditunda.');
+            return;
+        }
         try {
             await pendingOrderSvc.processPendingOrders();
         } catch (e) {
