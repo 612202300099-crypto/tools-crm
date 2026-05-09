@@ -1,4 +1,4 @@
-﻿// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
+// [CRITICAL FIX] Load .env dari folder yang SAMA dengan index.js
 // BUKAN dari process.cwd() — karena PM2 bisa start dari folder mana saja.
 // Tanpa ini, jika PM2 start dari /root/ → .env di /root/tools-crm/backend/.env tidak terbaca!
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
@@ -582,7 +582,9 @@ client.on('ready', async () => {
 
     // [STARTUP SYNC] Ambil pesan 48 jam terakhir
     // setBusy: Watchdog tidak akan restart selama startup sync berjalan
-    const estimatedSyncMinutes = 15; // Estimasi waktu sync maksimal
+    // [FIX] 15 menit tidak cukup — log menunjukkan sync bisa >20 menit
+    // Diperpanjang ke 30 menit (max yang diizinkan setBusy)
+    const estimatedSyncMinutes = 30;
     stability.setBusy(estimatedSyncMinutes * 60 * 1000);
 
     try {
@@ -607,8 +609,12 @@ client.on('ready', async () => {
             if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
 
             try {
-                // [FIX] Jeda antar chat — beri Chrome breathing room
-                await sleep(1500);
+                // [FIX] Jeda 500ms (dari 1500ms) — lebih cepat, Chrome semaphore sudah proteksi
+                await sleep(500);
+
+                // [FIX] Kirim heartbeat per chat — reset consecutiveFailures
+                // Mencegah Watchdog hitung kegagalan getState() saat Chrome sibuk sync
+                stability.heartbeat();
 
                 // Skip chat yang pesan terakhirnya sudah lama
                 if (chat.lastMessage && chat.lastMessage.timestamp < limitTimestamp) {
