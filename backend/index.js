@@ -122,8 +122,9 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
             const targetDate = new Date();
             targetDate.setDate(targetDate.getDate() - 2);
             
-            // Ambil semua customer dari 2 hari lalu yang belum COMPLETED
-            const customers = db.prepare("SELECT * FROM customers WHERE created_at >= ? AND status != 'COMPLETED'").all(targetDate.toISOString());
+            // Ambil semua customer dari 2 hari lalu yang belum VALIDATED
+            // (yang sudah VALIDATED berarti fotonya sudah beres diverifikasi)
+            const customers = db.prepare("SELECT * FROM customers WHERE created_at >= ? AND status != 'VALIDATED'").all(targetDate.toISOString());
             
             console.log(`[EMERGENCY] Ditemukan ${customers.length} customer untuk disisir ulang.`);
 
@@ -151,11 +152,15 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                     // 2. FETCH HISTORY WA (Gali Ulang otomatis untuk foto yang timeout/terlewat)
                     const chatId = `${c.phone_number}@c.us`;
                     try {
-                        const chat = await client.getChatById(chatId);
+                        // [CRITICAL FIX] Bungkus getChatById dengan timeout 10 detik agar tidak hang 3 menit!
+                        const chat = await chromeSemaphore.acquire('EMERGENCY:getChat', () => {
+                            return withTimeout(client.getChatById(chatId), 10000, 'emergency_getChat');
+                        }, { priority: 2, timeout: 20000 });
+
                         // Limit 15 pesan, cukup untuk mengambil foto yang tertinggal dalam 2 hari terakhir
                         const messages = await chromeSemaphore.acquire('EMERGENCY:fetch', () => {
-                            return withTimeout(chat.fetchMessages({ limit: 15 }), 30000, 'emergency_fetch');
-                        }, { priority: 2, timeout: 60000 });
+                            return withTimeout(chat.fetchMessages({ limit: 15 }), 15000, 'emergency_fetch');
+                        }, { priority: 2, timeout: 30000 });
 
                         let mediaCount = 0;
                         for (const msg of messages) {
@@ -168,7 +173,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                             console.log(`[EMERGENCY] 📸 Berhasil menarik ulang ${mediaCount} media dari WA.`);
                         }
                     } catch (e) {
-                        console.warn(`[EMERGENCY] ⚠️ Gagal Gali Ulang WA untuk ${c.phone_number}:`, e.message);
+                        console.warn(`[EMERGENCY] ⚠️ Gagal Gali Ulang WA untuk ${c.phone_number} (Lewati): ${e.message}`);
                     }
 
                     // 3. MASUKKAN SEMUA MEDIA KE ANTREAN DRIVE (Paced / Terkontrol)
