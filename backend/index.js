@@ -123,7 +123,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
             targetDate.setDate(targetDate.getDate() - 2);
             
             // Ambil semua customer dari 2 hari lalu yang belum COMPLETED
-            const customers = db.prepare('SELECT * FROM customers WHERE created_at >= ? AND status != "COMPLETED"').all(targetDate.toISOString());
+            const customers = db.prepare("SELECT * FROM customers WHERE created_at >= ? AND status != 'COMPLETED'").all(targetDate.toISOString());
             
             console.log(`[EMERGENCY] Ditemukan ${customers.length} customer untuk disisir ulang.`);
 
@@ -410,8 +410,11 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         stability.heartbeat(); // Kirim detak jantung ke Watchdog
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
         
-        // Kita tidak boleh memblokir `message.from` berbasis @lid secara absolut di sini 
-        // karena pesan OUTGOING (dari HP sendiri) seringkali di-sync oleh WA menggunakan LID host.
+        // [FIX TIMEOUT] Abaikan semua pesan dari/ke akun ber-ID LID (Local ID) atau Broadcast.
+        // Chrome/Puppeteer sering macet/timeout jika diminta getChat() untuk tipe kontak abstrak ini.
+        if (message.from.includes('@lid') || message.to.includes('@lid') || message.from === 'status@broadcast') {
+            return;
+        }
         
         let chat;
         try {
