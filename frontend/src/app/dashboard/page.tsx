@@ -161,7 +161,18 @@ function DashboardInboxContent() {
     return () => {
       socket.off('db_change', handleDbChange);
     };
-  }, []); // Array Dependensi Kosong: Mengunci re-subscribe! Tidak peduli filter berubah berapapun!
+  }, []); 
+
+  const handleEmergencySync = async () => {
+    if (!confirm('🚨 PERINGATAN DARURAT: Anda yakin ingin menjalankan Sapu Jagat?\n\nIni akan menyisir ulang SEMUA pelanggan dalam 2 hari terakhir, mengecek ulang Spreadsheet, menarik media WA yang gagal (Gali Ulang Otomatis), dan menata antrean Google Drive tanpa duplikat.\n\nProses berjalan otomatis di background selama ~20-30 menit.')) return;
+    
+    try {
+        const res = await apiClient.post('/emergency-mass-sync');
+        alert(res.data.message || 'Sapu jagat berhasil dimulai di background!');
+    } catch (err: any) {
+        alert('Gagal memulai: ' + (err.response?.data?.error || err.message));
+    }
+  };
 
   // Logika Pencarian & Filter Lokal (Hanya Teks & Status yang di filter lokal agar sangat cepat)
   const filteredCustomers = customers.filter(c => {
@@ -247,15 +258,25 @@ function DashboardInboxContent() {
   };
 
   return (
-    <div className="p-8 h-full flex flex-col bg-gray-50/50">
+     <div className="p-8 h-full flex flex-col bg-gray-50/50">
       <div className="flex justify-between items-end mb-6">
          <div>
             <h1 className="text-2xl font-black tracking-tight text-gray-900">Inbox Pesanan</h1>
             <p className="text-sm text-gray-500 font-medium mt-1">Mengelola pelanggan dari sumber API WhatsApp.</p>
          </div>
-         <div className="text-sm font-bold bg-white border px-4 py-2 rounded-xl text-indigo-600 shadow-sm flex items-center space-x-2">
-            <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-            <span>Real-time Active</span>
+         <div className="flex items-center space-x-3">
+             <button 
+                 onClick={handleEmergencySync}
+                 className="text-sm font-bold bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded-xl shadow-sm flex items-center space-x-2 hover:bg-red-100 transition-colors"
+                 title="Sapu Jagat 2 Hari Terakhir"
+             >
+                <span className="animate-pulse">🚨</span>
+                <span>Emergency Sync</span>
+             </button>
+             <div className="text-sm font-bold bg-white border px-4 py-2 rounded-xl text-indigo-600 shadow-sm flex items-center space-x-2">
+                <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+                <span>Real-time Active</span>
+             </div>
          </div>
       </div>
       

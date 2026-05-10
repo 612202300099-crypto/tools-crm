@@ -21,7 +21,10 @@ const objectStorage      = require('./services/object_storage_service');
 const pendingOrderSvc    = require('./services/pending_order_service');
 const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
-const { router: localApiRouter } = require('./api');
+const { router: localApiRouter, authenticateToken } = require('./api');
+const { getDb } = require('./database');
+const { lookupOrder } = require('./services/spreadsheet_service');
+const { processMessageCommand } = require('./services/ai_followup_service');
 
 // [BEST PRACTICE] Global Error Catcher — Server Tidak Pernah Mati
 // Mencegah server Node.js crash karena error yang tidak tertangkap.
@@ -104,6 +107,116 @@ app.use((req, res, next) => {
     next();
 });
 // --------------------------------
+
+// ─── EMERGENCY MASS SYNC ENDPOINT ────────────────────────────────────────────────
+app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) => {
+    res.json({ message: '🚨 Sapu Jagat (Emergency Mass Sync) dimulai di background. Pantau log PM2.' });
+
+    // Jalankan di background agar request HTTP tidak timeout
+    (async () => {
+        let isEmergencyRunning = true;
+        try {
+            console.log('\\n=========================================================');
+            console.log('[EMERGENCY] 🚨 Memulai "Sapu Jagat" untuk 2 hari terakhir...');
+            console.log('=========================================================\\n');
+            
+            const targetDate = new Date();
+            targetDate.setDate(targetDate.getDate() - 2);
+            
+            const db = getDb();
+            // Ambil semua customer dari 2 hari lalu yang belum COMPLETED
+            const customers = db.prepare('SELECT * FROM customers WHERE created_at >= ? AND status != "COMPLETED"').all(targetDate.toISOString());
+            
+            console.log(`[EMERGENCY] Ditemukan ${customers.length} customer untuk disisir ulang.`);
+
+            let successCount = 0;
+            
+            for (const c of customers) {
+                try {
+                    console.log(`\\n[EMERGENCY] 🔍 Memproses: ${c.phone_number} (Order: ${c.order_id || 'KOSONG'})`);
+                    
+                    // 1. RE-LOOKUP SPREADSHEET (Mencocokkan ulang data yang baru diupdate)
+                    if (c.order_id) {
+                        const lookup = await lookupOrder(c.order_id, { bypassCache: true });
+                        if (lookup && lookup.found) {
+                            db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
+                              .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
+                            c.resi = lookup.resi;
+                            c.store_name = lookup.storeName;
+                            c.order_detail = JSON.stringify(lookup.items);
+                            console.log(`[EMERGENCY] ✅ Update Spreadsheet: ${c.resi} - ${c.store_name}`);
+                        } else {
+                            console.log(`[EMERGENCY] ❌ Order ID ${c.order_id} masih belum ada di Spreadsheet.`);
+                        }
+                    }
+
+                    // 2. FETCH HISTORY WA (Gali Ulang otomatis untuk foto yang timeout/terlewat)
+                    const chatId = `${c.phone_number}@c.us`;
+                    try {
+                        const chat = await client.getChatById(chatId);
+                        // Limit 15 pesan, cukup untuk mengambil foto yang tertinggal dalam 2 hari terakhir
+                        const messages = await chromeSemaphore.acquire('EMERGENCY:fetch', () => {
+                            return withTimeout(chat.fetchMessages({ limit: 15 }), 30000, 'emergency_fetch');
+                        }, { priority: 2, timeout: 60000 });
+
+                        let mediaCount = 0;
+                        for (const msg of messages) {
+                            if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime()/1000)) {
+                                await processMessageCommand(msg, true); // Ini otomatis mendownload media yang belum ada
+                                mediaCount++;
+                            }
+                        }
+                        if (mediaCount > 0) {
+                            console.log(`[EMERGENCY] 📸 Berhasil menarik ulang ${mediaCount} media dari WA.`);
+                        }
+                    } catch (e) {
+                        console.warn(`[EMERGENCY] ⚠️ Gagal Gali Ulang WA untuk ${c.phone_number}:`, e.message);
+                    }
+
+                    // 3. MASUKKAN SEMUA MEDIA KE ANTREAN DRIVE (Paced / Terkontrol)
+                    const mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ?').all(c.id);
+                    let pushedDrive = 0;
+                    
+                    if (mediaList.length > 0) {
+                        db.transaction(() => {
+                            for (const media of mediaList) {
+                                const existing = db.prepare('SELECT id, status FROM drive_upload_queue WHERE media_id = ?').get(media.id);
+                                if (!existing) {
+                                    db.prepare(`INSERT INTO drive_upload_queue (customer_id, media_id, file_url, storage_key, storage_type, order_id, store_name, resi, product_abbr, sku, photo_index, customer_phone, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`)
+                                      .run(c.id, media.id, media.file_url, media.storage_key, media.storage_type, c.order_id, c.store_name, c.resi, 'LAINNYA', '', media.id, c.phone_number);
+                                    pushedDrive++;
+                                } else if (existing.status !== 'DONE' && existing.status !== 'SKIPPED') {
+                                    db.prepare(`UPDATE drive_upload_queue SET status = 'PENDING', resi = ?, store_name = ?, retry_count = 0 WHERE id = ?`)
+                                      .run(c.resi, c.store_name, existing.id);
+                                    pushedDrive++;
+                                }
+                            }
+                        })();
+                        if (pushedDrive > 0) {
+                            console.log(`[EMERGENCY] 🚀 Mendorong ${pushedDrive} foto ke antrean Google Drive.`);
+                        } else {
+                            console.log(`[EMERGENCY] ⏭️ Semua ${mediaList.length} foto sudah aman (DONE) di Drive.`);
+                        }
+                    }
+
+                    successCount++;
+                    // [PENTING] Jeda 1 detik agar tidak meng-DDoS Chrome / CPU VPS
+                    await sleep(1000); 
+                } catch (err) {
+                    console.error(`[EMERGENCY] ❌ Error memproses customer ${c.phone_number}:`, err.message);
+                }
+            }
+
+            console.log('\\n=========================================================');
+            console.log(`[EMERGENCY] ✅ SAPU JAGAT SELESAI! Memproses: ${successCount}/${customers.length} customer.`);
+            console.log('=========================================================\\n');
+        } catch (fatal) {
+            console.error('[EMERGENCY] ❌ Fatal Error:', fatal.message);
+        } finally {
+            isEmergencyRunning = false;
+        }
+    })();
+});
 
 app.use('/api/local', localApiRouter);
 
