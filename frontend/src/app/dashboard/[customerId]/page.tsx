@@ -381,7 +381,7 @@ export default function ChatDetail() {
     
     // [FIX] Menggunakan Server-Side Streaming ZIP
     // Mengalihkan download dari JSZip (lambat) ke endpoint backend (sangat cepat)
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem('access_token');
     if (!token) return alert('Sesi berakhir, silakan login ulang');
 
     // Karena window.open tidak bisa mengirim Authorization header dengan mudah,
