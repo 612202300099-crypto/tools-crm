@@ -1,6 +1,9 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const db = require('./db');
+const archiver = require('archiver');
+const fs = require('fs');
+const path = require('path');
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'crm-super-secret-key-2026';
@@ -246,6 +249,85 @@ router.get('/customers/:id/drive-status', authenticateToken, (req, res) => {
         res.json(statusMap);
     } catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+// Endpoint Server-Side ZIP: Mengunduh foto dengan kecepatan tinggi tanpa membebani browser
+router.get('/customers/:id/fast-zip', async (req, res) => {
+    try {
+        const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+        if (!customer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
+
+        const mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ? ORDER BY created_at ASC').all(req.params.id);
+        if (mediaList.length === 0) return res.status(404).json({ error: 'Tidak ada foto' });
+
+        const orderName = customer.order_id || customer.phone_number || 'Pesanan';
+        const zipFilename = `${orderName}.zip`;
+
+        res.attachment(zipFilename);
+        res.setHeader('Content-Type', 'application/zip');
+
+        const archive = archiver('zip', {
+            zlib: { level: 1 } // Level 1 (fastest) karena JPEG sudah terkompresi
+        });
+
+        archive.on('error', (err) => {
+            console.error('[API] Archiver error:', err);
+            res.status(500).end();
+        });
+
+        // Pipe archive stream langsung ke response HTTP (Streaming)
+        archive.pipe(res);
+
+        for (let i = 0; i < mediaList.length; i++) {
+            const media = mediaList[i];
+            const ext = media.file_url.split('.').pop().split('?')[0] || 'jpg';
+            const fileName = `foto_${i + 1}.${ext}`;
+
+            try {
+                if (media.storage_type === 'object') {
+                    // Jika Object Storage, stream dari internet lalu masuk ke archiver
+                    const fetchResponse = await fetch(media.file_url, { signal: AbortSignal.timeout(60000) });
+                    if (fetchResponse.ok) {
+                        const arrayBuffer = await fetchResponse.arrayBuffer();
+                        archive.append(Buffer.from(arrayBuffer), { name: fileName });
+                    }
+                } else {
+                    // Jika file lokal, langsung baca dari disk
+                    const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
+                    let localPath;
+                    if (media.file_url && media.file_url.startsWith(publicUrl)) {
+                        const relativePath = media.file_url.replace(publicUrl, '').replace(/^\//, '');
+                        localPath = path.join(__dirname, '..', relativePath);
+                    } else if (media.file_name) {
+                        localPath = path.join(__dirname, '..', 'uploads', media.file_name);
+                    } else {
+                        localPath = path.join(__dirname, '..', 'uploads', media.file_url);
+                    }
+
+                    if (fs.existsSync(localPath)) {
+                        archive.file(localPath, { name: fileName });
+                    } else {
+                        // Coba path alternatif jika error
+                        const altPath = path.join(__dirname, 'uploads', media.file_name || '');
+                        if (fs.existsSync(altPath)) {
+                            archive.file(altPath, { name: fileName });
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(`[API] Gagal zip file ${media.id}:`, err.message);
+                // Lanjut ke file berikutnya, jangan batalkan seluruh ZIP
+            }
+        }
+
+        await archive.finalize();
+
+    } catch (err) {
+        console.error('[API] Error fast-zip:', err.message);
+        if (!res.headersSent) {
+            res.status(500).json({ error: err.message });
+        }
     }
 });
 

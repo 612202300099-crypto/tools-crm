@@ -164,11 +164,16 @@ function DashboardInboxContent() {
   }, []); 
 
   const handleEmergencySync = async () => {
-    if (!confirm('🚨 PERINGATAN DARURAT: Anda yakin ingin menjalankan Sapu Jagat?\n\nIni akan menyisir ulang SEMUA pelanggan dalam 2 hari terakhir, mengecek ulang Spreadsheet, menarik media WA yang gagal (Gali Ulang Otomatis), dan menata antrean Google Drive tanpa duplikat.\n\nProses berjalan otomatis di background selama ~20-30 menit.')) return;
+    if (!confirm('🚨 PERINGATAN DARURAT: Anda yakin ingin menjalankan Sapu Jagat?\n\nIni akan menyisir ulang SEMUA pelanggan dalam beberapa hari terakhir, mengecek ulang Spreadsheet, menarik media WA yang gagal (Gali Ulang Otomatis), dan menata antrean Google Drive tanpa duplikat.\n\nProses berjalan otomatis di background selama ~20-30 menit.')) return;
     
+    // [FIX] Meminta input jumlah hari ke belakang
+    const daysStr = window.prompt("Berapa hari ke belakang yang ingin disisir ulang? (Ketik angka, misalnya: 2 atau 3 atau 7)", "2");
+    if (!daysStr) return; // Batal jika kosong/cancel
+    const days = parseInt(daysStr) || 2;
+
     try {
-        const res = await apiClient.post('/emergency-mass-sync');
-        alert(res.data.message || 'Sapu jagat berhasil dimulai di background!');
+        const res = await apiClient.post('/emergency-mass-sync', { days });
+        alert(res.data.message || `Sapu jagat untuk ${days} hari terakhir berhasil dimulai di background!`);
     } catch (err: any) {
         alert('Gagal memulai: ' + (err.response?.data?.error || err.message));
     }

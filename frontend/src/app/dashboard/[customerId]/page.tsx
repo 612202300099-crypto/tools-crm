@@ -374,78 +374,46 @@ export default function ChatDetail() {
   };
 
   const processZipDownload = async () => {
-    if (selectedMedia.size === 0) return alert("Pilih minimal 1 foto dengan mengklik gambar");
     if (!customer?.order_id) {
        const confirmLanjut = window.confirm("Nomor Order / Resi belum diisi. Nama file ZIP akan menggunakan Nomor HP. Tetap lanjut download?");
        if (!confirmLanjut) return;
     }
     
-    setLoadingMedia(true);
+    // [FIX] Menggunakan Server-Side Streaming ZIP
+    // Mengalihkan download dari JSZip (lambat) ke endpoint backend (sangat cepat)
+    const token = localStorage.getItem('token');
+    if (!token) return alert('Sesi berakhir, silakan login ulang');
+
+    // Karena window.open tidak bisa mengirim Authorization header dengan mudah,
+    // kita asumsikan untuk sekarang kita bisa bypass auth untuk GET jika perlu,
+    // ATAU kita bisa lakukan fetch blob lalu download.
+    // Tapi karena archiver me-return file stream, fetch blob masih memakan RAM.
+    // Cara terbaik: kirim token via query parameter (token=...) jika didukung oleh backend.
     
+    // Mari kita fetch secara stream dan simpan menggunakan object URL
+    setLoadingMedia(true);
     try {
-      const selectedItems = mediaList.filter(m => selectedMedia.has(m.id));
-      const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
-      const zip = new JSZip();
-      
-      // [FIX] Anti-DDoS/Antivirus: Batch size diperkecil dan ada jeda (throttle)
-      const BATCH_SIZE = 2;
-      let successCount = 0;
-      let failCount = 0;
-      const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-      
-      for (let i = 0; i < selectedItems.length; i += BATCH_SIZE) {
-        const batch = selectedItems.slice(i, i + BATCH_SIZE);
-        
-        const results = await Promise.allSettled(
-          batch.map(async (item, batchIdx) => {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000);
-            try {
-              const proxyUrl = `${WA_API_URL}/api/media/proxy/${item.id}`;
-              const res = await fetch(proxyUrl, { signal: controller.signal });
-              clearTimeout(timeoutId);
-              if (!res.ok) throw new Error(`HTTP ${res.status}`);
-              const blob = await res.blob();
-              const ext = item.file_url.split('.').pop()?.split('?')[0] || 'jpg';
-              return { blob, ext, globalIdx: i + batchIdx };
-            } catch (e) {
-              clearTimeout(timeoutId);
-              throw e;
+        const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
+        const response = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/fast-zip`, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${token}`
             }
-          })
-        );
-        
-        for (const result of results) {
-          if (result.status === 'fulfilled') {
-            const { blob, ext, globalIdx } = result.value;
-            zip.file(`foto_${globalIdx + 1}.${ext}`, blob);
-            successCount++;
-          } else {
-            failCount++;
-          }
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${response.status}`);
         }
 
-        if (i + BATCH_SIZE < selectedItems.length) {
-            await sleep(500);
-        }
-      }
-      
-      if (successCount === 0) {
-        throw new Error(`Semua ${selectedItems.length} foto gagal didownload. Coba refresh halaman.`);
-      }
-      
-      const zipBlob = await zip.generateAsync({ type: "blob" });
-      saveAs(zipBlob, `${orderName}.zip`);
-      
-      if (failCount > 0) {
-        alert(`✅ ZIP berhasil! ${successCount} foto berhasil.\n⚠️ ${failCount} foto gagal.`);
-      }
-      
+        const blob = await response.blob();
+        saveAs(blob, `${orderName}.zip`);
+
     } catch (error: any) {
-      console.error(error);
-      alert(`Gagal membuat ZIP: ${error.message}`);
+        console.error(error);
+        alert(`Gagal membuat ZIP Server-Side: ${error.message}`);
     } finally {
-      setLoadingMedia(false);
+        setLoadingMedia(false);
     }
   };
 

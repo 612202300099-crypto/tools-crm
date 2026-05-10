@@ -109,18 +109,20 @@ app.use((req, res, next) => {
 
 // ─── EMERGENCY MASS SYNC ENDPOINT ────────────────────────────────────────────────
 app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) => {
-    res.json({ message: '🚨 Sapu Jagat (Emergency Mass Sync) dimulai di background. Pantau log PM2.' });
+    // Bisa mengatur berapa hari ke belakang via parameter body (default 2 hari)
+    const daysBack = parseInt(req.body?.days) || parseInt(req.query?.days) || 2;
+    res.json({ message: `🚨 Sapu Jagat (Emergency Mass Sync) dimulai untuk ${daysBack} hari terakhir.` });
 
     // Jalankan di background agar request HTTP tidak timeout
     (async () => {
         let isEmergencyRunning = true;
         try {
             console.log('\\n=========================================================');
-            console.log('[EMERGENCY] 🚨 Memulai "Sapu Jagat" untuk 2 hari terakhir...');
+            console.log(`[EMERGENCY] 🚨 Memulai "Sapu Jagat" untuk ${daysBack} hari terakhir...`);
             console.log('=========================================================\\n');
             
             const targetDate = new Date();
-            targetDate.setDate(targetDate.getDate() - 2);
+            targetDate.setDate(targetDate.getDate() - daysBack);
             
             // Ambil semua customer dari 2 hari lalu yang belum VALIDATED
             // (yang sudah VALIDATED berarti fotonya sudah beres diverifikasi)
@@ -158,13 +160,42 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                             return withTimeout(client.getChatById(chatId), 10000, 'emergency_getChat');
                         }, { priority: 2, timeout: 20000 });
 
-                        // Limit 15 pesan, cukup untuk mengambil foto yang tertinggal dalam 2 hari terakhir
+                        // [FIX] Limit dinaikkan ke 50 (sebelumnya 15) agar benar-benar menggali pesan secara serius
                         const messages = await chromeSemaphore.acquire('EMERGENCY:fetch', () => {
-                            return withTimeout(chat.fetchMessages({ limit: 15 }), 15000, 'emergency_fetch');
+                            return withTimeout(chat.fetchMessages({ limit: 50 }), 20000, 'emergency_fetch');
                         }, { priority: 2, timeout: 30000 });
 
                         let mediaCount = 0;
                         for (const msg of messages) {
+                            // Ekstrak teks ke database untuk dibaca
+                            if (msg.type === 'chat' && msg.body) {
+                                db.prepare(`INSERT OR IGNORE INTO messages (id, customer_id, body, is_from_me, created_at) VALUES (?, ?, ?, ?, ?)`)
+                                  .run(msg.id.id, c.id, msg.body, msg.fromMe ? 1 : 0, new Date(msg.timestamp * 1000).toISOString());
+                                
+                                // [CRITICAL PINTAR] Baca Nomor Order dari pesan pelanggan yang baru digali!
+                                if (!msg.fromMe && !c.order_id) {
+                                    const orderIdMatch = msg.body.match(/\b\d{10,20}\b/);
+                                    if (orderIdMatch) {
+                                        const foundOrderId = orderIdMatch[0];
+                                        console.log(`[EMERGENCY] 🔎 Ditemukan No Order dari chat lama: ${foundOrderId}`);
+                                        db.prepare('UPDATE customers SET order_id = ? WHERE id = ?').run(foundOrderId, c.id);
+                                        c.order_id = foundOrderId;
+                                        
+                                        // Segera cek ke Spreadsheet agar mendapat resi!
+                                        const lookup = await lookupOrder(c.order_id, { bypassCache: true });
+                                        if (lookup && lookup.found) {
+                                            db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
+                                              .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
+                                            c.resi = lookup.resi;
+                                            c.store_name = lookup.storeName;
+                                            c.order_detail = JSON.stringify(lookup.items);
+                                            console.log(`[EMERGENCY] ✅ Berhasil mengaitkan Resi dari chat: ${c.resi}`);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Ekstrak media
                             if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime()/1000)) {
                                 await processMessageCommand(msg, true); // Ini otomatis mendownload media yang belum ada
                                 mediaCount++;
@@ -180,7 +211,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                     // 3. MASUKKAN SEMUA MEDIA KE ANTREAN DRIVE (Paced / Terkontrol)
                     // [CRITICAL FIX] Jangan dorong ke Drive jika resi/toko kosong (mencegah folder null/LAINNYA/null)
                     if (!c.resi || !c.store_name) {
-                        console.log(`[EMERGENCY] ⏭️ Melewati antrean Drive untuk ${c.phone_number}: Resi/Toko belum ada di Spreadsheet.`);
+                        console.log(`[EMERGENCY] ⏭️ Melewati antrean Drive untuk ${c.phone_number}: Resi/Toko belum ada di Spreadsheet (Tidak ada No Order di chat).`);
                         successCount++;
                         await sleep(1000);
                         continue;
