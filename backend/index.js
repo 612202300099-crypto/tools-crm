@@ -764,89 +764,14 @@ client.on('ready', async () => {
     // [OBJECT-STORAGE] Cek koneksi object storage saat startup
     objectStorage.healthCheck().catch(() => {});
 
-    // [STARTUP SYNC] Ambil pesan 48 jam terakhir
-    // setBusy: Watchdog tidak akan restart selama startup sync berjalan
-    // [FIX] 15 menit tidak cukup — log menunjukkan sync bisa >20 menit
-    // Diperpanjang ke 30 menit (max yang diizinkan setBusy)
-    const estimatedSyncMinutes = 30;
-    stability.setBusy(estimatedSyncMinutes * 60 * 1000);
-
-    try {
-        let chats = [];
-        try {
-            chats = await withTimeout(client.getChats(), 60000, 'getChats_startup');
-        } catch (getChatsErr) {
-            console.error('❌ Gagal mengambil daftar chat saat startup:', getChatsErr.message);
-            return;
-        }
-
-        const targetDate = new Date();
-        // [OPTIMASI EXTREME] Ubah dari 48 jam (2 hari) menjadi 6 jam saja!
-        // Jika server mati sebentar, 6 jam sudah sangat cukup untuk mengejar chat yang terlewat.
-        // 48 jam akan memaksa Chrome memproses ribuan chat, menyebabkan TIMEOUT dan CRASH.
-        targetDate.setHours(targetDate.getHours() - 6); 
-        const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
-        console.log(`[SYNC] 🕐 Menyinkronkan pesan sejak: ${targetDate.toLocaleString('id-ID')} (6 Jam Terakhir) | Total chat: ${chats.length}`);
-
-        let processedCount = 0;
-        let skippedCount = 0;
-        let errorCount = 0;
-
-        for (const chat of chats) {
-            if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
-
-            // [OPT] Skip chat tanpa lastMessage atau pesan sudah lama — sebelum buka Chrome
-            if (!chat.lastMessage || chat.lastMessage.timestamp < limitTimestamp) {
-                skippedCount++;
-                continue;
-            }
-
-            try {
-                // Heartbeat per chat — reset Watchdog consecutiveFailures
-                stability.heartbeat();
-
-                // [OPT] Limit 15 (dari 30) — cukup untuk healing pesan-pesan terakhir yang terlewat, tidak memblokir event loop Chrome
-                let historyMessages = [];
-                try {
-                    historyMessages = await chromeSemaphore.acquire('SYNC:fetchMessages', () => {
-                        return withTimeout(
-                            chat.fetchMessages({ limit: 15 }),
-                            45000,
-                            'fetchMessages_startup'
-                        );
-                    }, { priority: 2, timeout: 90000 });
-                } catch (fetchErr) {
-                    console.warn(`[SYNC] ⚠️ Skip chat ${chat.id.user}: ${fetchErr.message.substring(0, 60)}`);
-                    errorCount++;
-                    continue;
-                }
-
-                for (const msg of historyMessages) {
-                    if (msg.timestamp >= limitTimestamp) {
-                        processedCount++;
-                        await processMessageCommand(msg, true);
-                    }
-                }
-
-                // Log progress setiap 50 chat aktif
-                const totalDone = processedCount + skippedCount + errorCount;
-                if (totalDone > 0 && totalDone % 50 === 0) {
-                    console.log(`[SYNC] 📊 Progress: ${totalDone}/${chats.length} | Pesan: ${processedCount} | Skip: ${skippedCount} | Err: ${errorCount}`);
-                }
-                
-                // [CRITICAL FIX] Jeda 300ms setiap selesai 1 chat. 
-                // Ini mencegah Node.js Event Loop dan main thread Chrome dari pembekuan (DDoS internal).
-                await sleep(300);
-
-            } catch (chatErr) {
-                errorCount++;
-                console.error(`⚠️ Gagal menyisir chat ${chat.id.user}:`, chatErr.message);
-            }
-        }
-        console.log(`✅ [SYNC] Selesai! Diproses: ${processedCount} pesan | Dilewati: ${skippedCount} chat lama | Error: ${errorCount} chat`);
-    } catch (e) {
-        console.error('⚠️ Gagal total sinkronisasi pesan offline:', e.message);
-    }
+    // [STARTUP SYNC] DINONAKTIFKAN (Penyebab Chrome Freeze & Pesan Baru Tidak Masuk)
+    // Melakukan fetchMessages pada ratusan chat saat startup terbukti membuat memory Puppeteer
+    // membengkak (bloat) dan menulikan (deafen) event listener 'message_create'.
+    // Sebagai gantinya, sistem akan mengandalkan pesan real-time dan Emergency Sync manual.
+    console.log(`[SYNC] Startup Sync dinonaktifkan untuk menjaga kestabilan memori WhatsApp Web.`);
+    
+    // Kurangi waktu setBusy agar antrean lain (Drive/Pending Order) bisa langsung jalan
+    stability.setBusy(60 * 1000); 
 });
 
 
@@ -1292,18 +1217,17 @@ app.post('/api/wa/resync', async (req, res) => {
             }
 
             const chatId = phone_number + '@c.us';
-            const chat = await withTimeout(
-                chromeSemaphore.acquire('API:resync_getChat', () => client.getChatById(chatId), { priority: 2, timeout: 30000 }), 
-                30000, 
-                'getChatById_resync'
-            );
+            // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
+            const chat = await chromeSemaphore.acquire('API:resync_getChat', () => {
+                return withTimeout(client.getChatById(chatId), 20000, 'getChatById_resync');
+            }, { priority: 2, timeout: 30000 });
 
             console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number}`);
-            const historyMessages = await withTimeout(
-                chromeSemaphore.acquire('API:resync_fetchMsg', () => chat.fetchMessages({ limit: 500 }), { priority: 2, timeout: 120000 }),
-                120000,
-                'fetchMessages_resync'
-            );
+            
+            // [CRITICAL FIX] withTimeout harus DI DALAM acquire!
+            const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
+                return withTimeout(chat.fetchMessages({ limit: 100 }), 45000, 'fetchMessages_resync');
+            }, { priority: 2, timeout: 60000 });
 
             let count = 0;
             for (const msg of historyMessages) {
