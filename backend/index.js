@@ -607,9 +607,12 @@ client.on('ready', async () => {
         }
 
         const targetDate = new Date();
-        targetDate.setDate(targetDate.getDate() - 2); // 48 jam
+        // [OPTIMASI EXTREME] Ubah dari 48 jam (2 hari) menjadi 6 jam saja!
+        // Jika server mati sebentar, 6 jam sudah sangat cukup untuk mengejar chat yang terlewat.
+        // 48 jam akan memaksa Chrome memproses ribuan chat, menyebabkan TIMEOUT dan CRASH.
+        targetDate.setHours(targetDate.getHours() - 6); 
         const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
-        console.log(`[SYNC] 🕐 Menyinkronkan pesan sejak: ${targetDate.toLocaleString('id-ID')} | Total chat: ${chats.length}`);
+        console.log(`[SYNC] 🕐 Menyinkronkan pesan sejak: ${targetDate.toLocaleString('id-ID')} (6 Jam Terakhir) | Total chat: ${chats.length}`);
 
         let processedCount = 0;
         let skippedCount = 0;
@@ -628,12 +631,12 @@ client.on('ready', async () => {
                 // Heartbeat per chat — reset Watchdog consecutiveFailures
                 stability.heartbeat();
 
-                // [OPT] Limit 30 (dari 50) — cukup untuk healing, tidak overload Chrome
+                // [OPT] Limit 15 (dari 30) — cukup untuk healing pesan-pesan terakhir yang terlewat, tidak memblokir event loop Chrome
                 let historyMessages = [];
                 try {
                     historyMessages = await chromeSemaphore.acquire('SYNC:fetchMessages', () => {
                         return withTimeout(
-                            chat.fetchMessages({ limit: 30 }),
+                            chat.fetchMessages({ limit: 15 }),
                             45000,
                             'fetchMessages_startup'
                         );
@@ -656,6 +659,11 @@ client.on('ready', async () => {
                 if (totalDone > 0 && totalDone % 50 === 0) {
                     console.log(`[SYNC] 📊 Progress: ${totalDone}/${chats.length} | Pesan: ${processedCount} | Skip: ${skippedCount} | Err: ${errorCount}`);
                 }
+                
+                // [CRITICAL FIX] Jeda 300ms setiap selesai 1 chat. 
+                // Ini mencegah Node.js Event Loop dan main thread Chrome dari pembekuan (DDoS internal).
+                await sleep(300);
+
             } catch (chatErr) {
                 errorCount++;
                 console.error(`⚠️ Gagal menyisir chat ${chat.id.user}:`, chatErr.message);
