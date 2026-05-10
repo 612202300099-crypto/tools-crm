@@ -371,7 +371,7 @@ const client = new Client({
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--disable-renderer-backgrounding',
-            '--js-flags=--max-old-space-size=512'  // 512MB lebih aman di VPS
+            '--js-flags=--max-old-space-size=2048'  // Ditingkatkan ke 2048MB agar tidak OOM saat me-load ribuan kontak
         ]
     }
 });
@@ -755,7 +755,11 @@ client.on('ready', async () => {
     qrCodeData = '';
     
     stability.start();
-    await hydrateContactCache();
+    
+    // [HYDRATION] DINONAKTIFKAN (Penyebab Utama Chrome Freeze / TIMEOUT_GET_STATE)
+    // Menarik 8000+ kontak sekaligus membuat Memory Chrome (V8) meledak (OOM).
+    // Sebagai gantinya, sistem akan melakukan "Lazy Resolve" pada resolveIdentifier()
+    console.log('[SYSTEM] Global Contact Hydration dinonaktifkan untuk menghemat RAM Chrome.');
 
     // [PENDING-ORDER] Inject dependensi ke pending order service
     pendingOrderSvc.init(client, supabase);
