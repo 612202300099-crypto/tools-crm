@@ -1,7 +1,6 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const db = require('./db');
-const archiver = require('archiver');
 const fs = require('fs');
 const path = require('path');
 
@@ -266,6 +265,9 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
 
         res.attachment(zipFilename);
         res.setHeader('Content-Type', 'application/zip');
+
+        // Gunakan dynamic import karena archiver versi terbaru adalah ES Module
+        const { default: archiver } = await import('archiver');
 
         const archive = archiver('zip', {
             zlib: { level: 1 } // Level 1 (fastest) karena JPEG sudah terkompresi
