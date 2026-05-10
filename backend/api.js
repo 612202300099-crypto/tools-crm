@@ -158,11 +158,6 @@ router.post('/customers/:id/drive-sync', authenticateToken, async (req, res) => 
             return res.status(400).json({ error: 'Gagal: Customer ini belum memiliki Nomor Order (Scan ID atau ketik manual terlebih dahulu)' });
         }
 
-        let finalResi = customer.resi;
-        let finalStoreName = customer.store_name;
-        let productAbbr = 'LAINNYA';
-        let sku = '';
-
         // 1. Cek Spreadsheet Terlebih Dahulu secara langsung (Bypass Cache)
         const lookup = await lookupOrder(customer.order_id, { bypassCache: true });
         

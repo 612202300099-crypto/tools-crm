@@ -117,21 +117,41 @@ export default function ChatDetail() {
     }
   }, [scanResult]);
 
-  // Polling Real-time Status Google Drive per 3 detik
+  // Polling Real-time Status Google Drive per 5 detik (Smart Polling)
   useEffect(() => {
-    const fetchDriveStatus = async () => {
+    let isMounted = true;
+    let timeoutId: NodeJS.Timeout;
+
+    const checkDriveStatus = async () => {
+        if (!isMounted) return;
         try {
             const res = await apiClient.get(`/customers/${customerId}/drive-status`);
-            if (res.data) setDriveStatus(res.data);
+            if (res.data) {
+                setDriveStatus(res.data);
+                
+                // Cek apakah masih ada foto yang mengantre atau diproses
+                const hasActive = Object.values(res.data).some(
+                    (s: any) => s === 'PENDING' || s === 'UPLOADING' || s === 'WAITING_RESI'
+                );
+                
+                // Hanya polling lagi jika ada yang aktif (mengurangi beban server drastis)
+                if (hasActive && isMounted) {
+                    timeoutId = setTimeout(checkDriveStatus, 5000);
+                }
+            }
         } catch (err) {
-            // silent fail for polling
+            // silent fail, retry later if needed
+            if (isMounted) timeoutId = setTimeout(checkDriveStatus, 10000); // 10 detik retry
         }
     };
 
-    fetchDriveStatus();
-    const interval = setInterval(fetchDriveStatus, 3000);
-    return () => clearInterval(interval);
-  }, [customerId]);
+    checkDriveStatus();
+
+    return () => {
+        isMounted = false;
+        if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [customerId, isSyncingDrive]); // Trigger ulang polling saat tombol Antar ke Drive ditekan
 
   const fetchData = async () => {
     try {
