@@ -24,7 +24,6 @@ const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidate
 const { router: localApiRouter, authenticateToken } = require('./api');
 const { getDb } = require('./database');
 const { lookupOrder } = require('./services/spreadsheet_service');
-const { processMessageCommand } = require('./services/ai_followup_service');
 
 // [BEST PRACTICE] Global Error Catcher — Server Tidak Pernah Mati
 // Mencegah server Node.js crash karena error yang tidak tertangkap.
