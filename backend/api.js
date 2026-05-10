@@ -267,9 +267,9 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
         res.setHeader('Content-Type', 'application/zip');
 
         // Gunakan dynamic import karena archiver versi terbaru adalah ES Module
-        const { default: archiver } = await import('archiver');
+        const { ZipArchive } = await import('archiver');
 
-        const archive = archiver('zip', {
+        const archive = new ZipArchive({
             zlib: { level: 1 } // Level 1 (fastest) karena JPEG sudah terkompresi
         });
 
