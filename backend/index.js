@@ -177,8 +177,17 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                     }
 
                     // 3. MASUKKAN SEMUA MEDIA KE ANTREAN DRIVE (Paced / Terkontrol)
+                    // [CRITICAL FIX] Jangan dorong ke Drive jika resi/toko kosong (mencegah folder null/LAINNYA/null)
+                    if (!c.resi || !c.store_name) {
+                        console.log(`[EMERGENCY] ⏭️ Melewati antrean Drive untuk ${c.phone_number}: Resi/Toko belum ada di Spreadsheet.`);
+                        successCount++;
+                        await sleep(1000);
+                        continue;
+                    }
+
                     const mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ?').all(c.id);
                     let pushedDrive = 0;
+
                     
                     if (mediaList.length > 0) {
                         db.transaction(() => {
