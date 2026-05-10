@@ -190,16 +190,30 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
 
                     
                     if (mediaList.length > 0) {
+                        // [FIX FOLDER LAINNYA] Ambil productAbbr (POLAROID) dan SKU dari detail pesanan
+                        let productAbbr = 'LAINNYA';
+                        let sku = '';
+                        try {
+                            const items = JSON.parse(c.order_detail || '[]');
+                            const mainItem = items.find(i => i.isPolaroid) || items[0];
+                            if (mainItem) {
+                                productAbbr = mainItem.productAbbr || 'LAINNYA';
+                                sku = mainItem.sku || '';
+                            }
+                        } catch (e) {
+                            console.warn(`[EMERGENCY] Gagal parse order_detail untuk ${c.phone_number}`);
+                        }
+
                         db.transaction(() => {
                             for (const media of mediaList) {
                                 const existing = db.prepare('SELECT id, status FROM drive_upload_queue WHERE media_id = ?').get(media.id);
                                 if (!existing) {
                                     db.prepare(`INSERT INTO drive_upload_queue (customer_id, media_id, file_url, storage_key, storage_type, order_id, store_name, resi, product_abbr, sku, photo_index, customer_phone, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`)
-                                      .run(c.id, media.id, media.file_url, media.storage_key, media.storage_type, c.order_id, c.store_name, c.resi, 'LAINNYA', '', media.id, c.phone_number);
+                                      .run(c.id, media.id, media.file_url, media.storage_key, media.storage_type, c.order_id, c.store_name, c.resi, productAbbr, sku, media.id, c.phone_number);
                                     pushedDrive++;
                                 } else if (existing.status !== 'DONE' && existing.status !== 'SKIPPED') {
-                                    db.prepare(`UPDATE drive_upload_queue SET status = 'PENDING', resi = ?, store_name = ?, retry_count = 0 WHERE id = ?`)
-                                      .run(c.resi, c.store_name, existing.id);
+                                    db.prepare(`UPDATE drive_upload_queue SET status = 'PENDING', resi = ?, store_name = ?, product_abbr = ?, sku = ?, retry_count = 0 WHERE id = ?`)
+                                      .run(c.resi, c.store_name, productAbbr, sku, existing.id);
                                     pushedDrive++;
                                 }
                             }
