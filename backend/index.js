@@ -124,7 +124,8 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
             
             // Ambil semua customer dari 2 hari lalu yang belum VALIDATED
             // (yang sudah VALIDATED berarti fotonya sudah beres diverifikasi)
-            const customers = db.prepare("SELECT * FROM customers WHERE created_at >= ? AND status != 'VALIDATED'").all(targetDate.toISOString());
+            // [CRITICAL FIX] Urutkan dari yang paling LAMA (ASC) agar pelanggan yang paling menderita menunggu lama segera diselamatkan lebih dulu.
+            const customers = db.prepare("SELECT * FROM customers WHERE created_at >= ? AND status != 'VALIDATED' ORDER BY created_at ASC").all(targetDate.toISOString());
             
             console.log(`[EMERGENCY] Ditemukan ${customers.length} customer untuk disisir ulang.`);
 
