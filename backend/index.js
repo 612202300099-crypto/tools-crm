@@ -22,7 +22,7 @@ const pendingOrderSvc    = require('./services/pending_order_service');
 const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
 const { router: localApiRouter, authenticateToken } = require('./api');
-const { getDb } = require('./database');
+const db = require('./db');
 const { lookupOrder } = require('./services/spreadsheet_service');
 
 // [BEST PRACTICE] Global Error Catcher — Server Tidak Pernah Mati
@@ -122,7 +122,6 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
             const targetDate = new Date();
             targetDate.setDate(targetDate.getDate() - 2);
             
-            const db = getDb();
             // Ambil semua customer dari 2 hari lalu yang belum COMPLETED
             const customers = db.prepare('SELECT * FROM customers WHERE created_at >= ? AND status != "COMPLETED"').all(targetDate.toISOString());
             
