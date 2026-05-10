@@ -394,7 +394,8 @@ export default function ChatDetail() {
     setLoadingMedia(true);
     try {
         const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
-        const response = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/fast-zip`, {
+        const mediaParam = selectedMedia.size > 0 ? `?mediaIds=${Array.from(selectedMedia).join(',')}` : '';
+        const response = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/fast-zip${mediaParam}`, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${token}`

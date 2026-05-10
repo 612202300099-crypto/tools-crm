@@ -257,8 +257,18 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
         const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
         if (!customer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
 
-        const mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ? ORDER BY created_at ASC').all(req.params.id);
-        if (mediaList.length === 0) return res.status(404).json({ error: 'Tidak ada foto' });
+        let mediaList = [];
+        if (req.query.mediaIds) {
+            const ids = req.query.mediaIds.split(',').filter(Boolean);
+            if (ids.length > 0) {
+                const placeholders = ids.map(() => '?').join(',');
+                mediaList = db.prepare(`SELECT * FROM media WHERE customer_id = ? AND id IN (${placeholders}) ORDER BY created_at ASC`).all(req.params.id, ...ids);
+            }
+        } else {
+            mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ? ORDER BY created_at ASC').all(req.params.id);
+        }
+
+        if (mediaList.length === 0) return res.status(404).json({ error: 'Tidak ada foto yang valid untuk didownload' });
 
         const orderName = customer.order_id || customer.phone_number || 'Pesanan';
         const zipFilename = `${orderName}.zip`;
