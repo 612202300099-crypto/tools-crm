@@ -277,10 +277,16 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Transfer-Encoding', 'chunked');
 
-        // [FIX] archiver v8 adalah ESM — gunakan dynamic import dengan .default
-        // require('archiver') TIDAK bekerja karena ini ESM package
-        const archiverModule = await import('archiver');
-        const archiver = archiverModule.default || archiverModule;
+        // archiver adalah CommonJS package — gunakan require() biasa
+        // (dynamic import hanya diperlukan untuk pure ESM package)
+        let archiver;
+        try {
+            archiver = require('archiver');
+        } catch (e) {
+            // Fallback: dynamic import jika require gagal
+            const mod = await import('archiver');
+            archiver = mod.default || mod;
+        }
         const archive = archiver('zip', {
             zlib: { level: 1 } // Level 1 (fastest) karena JPEG sudah terkompresi
         });

@@ -1403,105 +1403,21 @@ app.post('/api/wa/resync', async (req, res) => {
                     }, { priority: 2, timeout: 40000 });
 
                     // ═══════════════════════════════════════════════════════════════
-                    // [UPGRADE GALI ULANG v4] DEEP PAGINATION via loadEarlierMessages
+                    // [GALI ULANG v5] SIMPLE HIGH-LIMIT FETCH
                     // ═══════════════════════════════════════════════════════════════
-                    // fetchMessages({ limit: 3000 }) hanya membaca pesan yang SUDAH ADA
-                    // di RAM browser. Untuk chat dengan 400+ foto, mayoritas pesan lama
-                    // tidak ada di RAM → fetchMessages hanya mengembalikan ~50 pesan terbaru.
-                    //
-                    // Solusi: Panggil loadEarlierMessages() secara LOOP seperti "scroll ke atas"
-                    // di WhatsApp Web — memaksa browser memuat semua halaman riwayat dari server WA.
+                    // whatsapp-web.js fetchMessages({ limit: N }) secara internal
+                    // memuat pesan dari server WA (bukan hanya RAM) ketika limit > jumlah
+                    // pesan yg ada di cache. Cukup satu panggilan dengan limit besar.
+                    // Loop loadEarlierMessages dihapus karena tidak kompatibel dengan
+                    // semua versi & menyebabkan bubble kosong (tipe: unknown).
                     // ═══════════════════════════════════════════════════════════════
-                    emitProgress('resync_progress', { phone_number, message: `Memuat riwayat penuh dari ${targetChatId} (metode pagination)... Mohon tunggu.` });
+                    emitProgress('resync_progress', { phone_number, message: `Memuat riwayat dari ${targetChatId}... Mohon tunggu.` });
 
-                    // Step 1: Muat awal
-                    let allMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                        return withTimeout(chat.fetchMessages({ limit: 100 }), 60000, 'fetchMessages_initial');
-                    }, { priority: 2, timeout: 90000 });
+                    const allMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
+                        return withTimeout(chat.fetchMessages({ limit: 5000 }), 180000, 'fetchMessages_deep');
+                    }, { priority: 2, timeout: 210000 });
 
-                    let totalLoaded = allMessages.length;
-                    let prevCount = 0;
-                    let loadIterations = 0;
-                    const MAX_ITERATIONS = 50; // Maks 50x scroll ke atas = sampai 5000+ pesan
-                    const TARGET_MEDIA = 500; // Target: muat sampai 500 foto/media ditemukan
-
-                    console.log(`[RESYNC] 📜 Awal: ${totalLoaded} pesan. Mulai paginasi mendalam...`);
-
-                    // Step 2: Loop "scroll ke atas" via WA internal API
-                    // Fallback: jika chat.loadEarlierMessages tidak tersedia (versi lama),
-                    // kita panggil langsung API internal WhatsApp Web via pupPage.evaluate()
-                    while (loadIterations < MAX_ITERATIONS) {
-                        loadIterations++;
-                        prevCount = totalLoaded;
-
-                        try {
-                            // Coba cara 1: method resmi (versi terbaru whatsapp-web.js)
-                            let hasMore = false;
-                            if (typeof chat.loadEarlierMessages === 'function') {
-                                hasMore = await chromeSemaphore.acquire('API:resync_loadEarlier', () => {
-                                    return withTimeout(chat.loadEarlierMessages(), 30000, 'loadEarlierMessages');
-                                }, { priority: 2, timeout: 45000 });
-                            } else {
-                                // Cara 2: Panggil API internal WA Web langsung via browser page
-                                // Ini bekerja di semua versi karena memanggil kode JS di Chrome
-                                hasMore = await chromeSemaphore.acquire('API:resync_loadEarlier', () => {
-                                    return withTimeout(
-                                        client.pupPage.evaluate(async (chatId) => {
-                                            const chat = window.Store.Chat.get(chatId);
-                                            if (!chat) return false;
-                                            const msgs = chat.msgs && chat.msgs.models;
-                                            if (!msgs || msgs.length === 0) return false;
-                                            const oldestMsg = msgs[0];
-                                            // Coba berbagai nama internal API WA
-                                            if (window.Store.ConversationMsgs && window.Store.ConversationMsgs.loadEarlierMsgs) {
-                                                await window.Store.ConversationMsgs.loadEarlierMsgs(chat, oldestMsg, false);
-                                                return true;
-                                            } else if (window.WWebJS && window.WWebJS.loadEarlierMessages) {
-                                                await window.WWebJS.loadEarlierMessages(chatId);
-                                                return true;
-                                            }
-                                            return false;
-                                        }, targetChatId),
-                                        30000,
-                                        'loadEarlierMessages_internal'
-                                    );
-                                }, { priority: 2, timeout: 45000 });
-                            }
-
-                            // Ambil ulang semua pesan setelah load lebih banyak
-                            const refreshed = await chromeSemaphore.acquire('API:resync_fetchAfterLoad', () => {
-                                return withTimeout(chat.fetchMessages({ limit: 5000 }), 120000, 'fetchMessages_refresh');
-                            }, { priority: 2, timeout: 150000 });
-
-                            totalLoaded = refreshed.length;
-                            const newFound = totalLoaded - prevCount;
-                            const mediaFoundSoFar = refreshed.filter(m => m.hasMedia && !m.fromMe).length;
-
-                            console.log(`[RESYNC] 📜 Iterasi ${loadIterations}: ${totalLoaded} pesan total (+${newFound} baru) | ${mediaFoundSoFar} foto customer`);
-
-                            if (newFound > 0) {
-                                allMessages = refreshed;
-                            }
-
-                            emitProgress('resync_progress', { phone_number, message: `Iterasi ${loadIterations}: ${totalLoaded} pesan dimuat, ${mediaFoundSoFar} foto customer ditemukan...` });
-
-                            if (!hasMore || newFound === 0) {
-                                console.log(`[RESYNC] ✅ Paginasi selesai: ${totalLoaded} pesan total.`);
-                                break;
-                            }
-
-                            if (mediaFoundSoFar >= TARGET_MEDIA) {
-                                console.log(`[RESYNC] ✅ Target ${TARGET_MEDIA} media tercapai.`);
-                                break;
-                            }
-
-                            await new Promise(r => setTimeout(r, 800));
-
-                        } catch (loadErr) {
-                            console.warn(`[RESYNC] ⚠️ Paginasi iterasi ${loadIterations} gagal:`, loadErr.message);
-                            break;
-                        }
-                    }
+                    console.log(`[RESYNC] 📜 ${allMessages.length} pesan dimuat dari ${targetChatId}`);
 
                     const mediaInBatch = allMessages.filter(m => m.hasMedia && !m.fromMe).length;
                     console.log(`[RESYNC] 📊 FINAL: ${allMessages.length} pesan (${mediaInBatch} foto/video dari customer) di ${targetChatId}`);
@@ -1537,6 +1453,13 @@ app.post('/api/wa/resync', async (req, res) => {
 
                     let count = 0;
                     for (const msg of allMessages) {
+                        // [FIX BUBBLE KOSONG] Skip pesan type:unknown tanpa body & media
+                        // Ini adalah pesan sistem internal WA (call logs, dll) yang jika
+                        // diinsert ke DB akan muncul sebagai bubble kosong di UI chat
+                        if (msg.type === 'unknown' && !msg.hasMedia && !msg.body) continue;
+                        if (msg.type === 'e2e_notification') continue;
+                        if (msg.type === 'notification_template') continue;
+
                         await processMessageCommand(msg, true, false, cachedContext);
                         count++;
                         if (msg.hasMedia && !msg.fromMe) totalMediaDitemukan++;
@@ -1550,24 +1473,25 @@ app.post('/api/wa/resync', async (req, res) => {
                 }
             }
 
-            // [HEALING PASS] Cari media di DB yang sudah tercatat tapi belum ter-upload ke storage
-            // Ini menyelamatkan foto yang masuk DB tapi downloadnya gagal di masa lalu
+            // [HEALING PASS] Cari media di DB yg sudah tercatat tapi belum ter-upload
+            // [FIX] Pakai raw SQLite (db) langsung — BUKAN supabase shim yang tidak support .is()
             try {
-                const { data: missingMedia } = await supabase
-                    .from('media')
-                    .select('id, message_id, storage_key')
-                    .eq('customer_id', customer_id)
-                    .is('storage_key', null); // Hanya yang belum ter-upload
+                const missingMedia = db.prepare(
+                    `SELECT m.id, m.message_id, m.storage_key
+                     FROM media m
+                     WHERE m.customer_id = ?
+                       AND (m.storage_key IS NULL OR m.storage_key = '')`
+                ).all(customer_id);
 
                 if (missingMedia && missingMedia.length > 0) {
                     console.log(`[RESYNC] 🩹 HEALING: ${missingMedia.length} media di DB belum ter-upload. Memasukkan ulang ke antrean...`);
-                    emitProgress('resync_progress', { phone_number, message: `🩹 Ditemukan ${missingMedia.length} foto yang pernah gagal diunduh. Mencoba lagi...` });
-                    
-                    const { data: custData } = await supabase.from('customers').select('*').eq('id', customer_id).single();
+                    emitProgress('resync_progress', { phone_number, message: `🩹 Ditemukan ${missingMedia.length} foto yg pernah gagal diunduh. Mencoba lagi...` });
+
+                    const custData = db.prepare('SELECT * FROM customers WHERE id = ?').get(customer_id);
                     if (custData) {
                         for (const m of missingMedia) {
                             try {
-                                const { data: msgRecord } = await supabase.from('messages').select('wa_id, created_at').eq('id', m.message_id).single();
+                                const msgRecord = db.prepare('SELECT wa_id, created_at FROM messages WHERE id = ?').get(m.message_id);
                                 if (msgRecord && msgRecord.wa_id) {
                                     mediaQueue.addToQueue(
                                         msgRecord.wa_id,
@@ -1576,7 +1500,7 @@ app.post('/api/wa/resync', async (req, res) => {
                                         true // PRIORITY: langsung ke depan antrean!
                                     );
                                 }
-                            } catch (healItemErr) { /* skip item gagal, lanjut yang lain */ }
+                            } catch (healItemErr) { /* skip item gagal */ }
                         }
                     }
                 }
