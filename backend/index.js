@@ -1300,18 +1300,16 @@ app.post('/api/wa/resync', async (req, res) => {
             }
 
             const chatId = phone_number + '@c.us';
-            const chat = await withTimeout(
-                chromeSemaphore.acquire('API:resync_getChat', () => client.getChatById(chatId), { priority: 2, timeout: 30000 }),
-                30000,
-                'getChatById_resync'
-            );
+            // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
+            const chat = await chromeSemaphore.acquire('API:resync_getChat', () => {
+                return withTimeout(client.getChatById(chatId), 30000, 'getChatById_resync');
+            }, { priority: 2, timeout: 40000 });
 
             console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number}`);
-            const historyMessages = await withTimeout(
-                chromeSemaphore.acquire('API:resync_fetchMsg', () => chat.fetchMessages({ limit: 500 }), { priority: 2, timeout: 120000 }),
-                120000,
-                'fetchMessages_resync'
-            );
+            const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
+                // Gunakan 200 agar konsisten dan lebih aman dari blokir
+                return withTimeout(chat.fetchMessages({ limit: 200 }), 120000, 'fetchMessages_resync');
+            }, { priority: 2, timeout: 150000 });
 
             let count = 0;
             for (const msg of historyMessages) {
@@ -1336,11 +1334,9 @@ app.post('/api/wa/global-sweep', async (req, res) => {
             console.log(`[GLOBAL-SWEEP] 🌍 Memulai penyisiran massal ke semua chat...`);
             
             // Ambil semua chat yang ada di sidebar WhatsApp Web
-            const chats = await withTimeout(
-                chromeSemaphore.acquire('API:getChats', () => client.getChats(), { priority: 2, timeout: 60000 }),
-                60000,
-                'getChats_global'
-            );
+            const chats = await chromeSemaphore.acquire('API:getChats', () => {
+                return withTimeout(client.getChats(), 60000, 'getChats_global');
+            }, { priority: 2, timeout: 90000 });
 
             console.log(`[GLOBAL-SWEEP] Ditemukan ${chats.length} chat. Mulai memfilter dan menyisir...`);
 
@@ -1355,11 +1351,9 @@ app.post('/api/wa/global-sweep', async (req, res) => {
                 
                 try {
                     // Ambil 200 pesan terakhir dari setiap chat agar riwayat 2-3 hari lalu aman
-                    const historyMessages = await withTimeout(
-                        chromeSemaphore.acquire('API:sweep_fetchMsg', () => chat.fetchMessages({ limit: 200 }), { priority: 3, timeout: 60000 }),
-                        60000,
-                        'fetchMessages_sweep'
-                    );
+                    const historyMessages = await chromeSemaphore.acquire('API:sweep_fetchMsg', () => {
+                        return withTimeout(chat.fetchMessages({ limit: 200 }), 60000, 'fetchMessages_sweep');
+                    }, { priority: 3, timeout: 90000 });
 
                     for (const msg of historyMessages) {
                         // Prioritaskan hanya pesan yang memiliki media (foto/video/dokumen)
