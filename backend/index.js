@@ -470,9 +470,8 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         stability.heartbeat(); // Kirim detak jantung ke Watchdog
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
 
-        // [FIX TIMEOUT] Abaikan semua pesan dari/ke akun ber-ID LID (Local ID) atau Broadcast.
-        // Chrome/Puppeteer sering macet/timeout jika diminta getChat() untuk tipe kontak abstrak ini.
-        if (message.from.includes('@lid') || message.to.includes('@lid') || message.from === 'status@broadcast') {
+        // Abaikan status broadcast agar tidak memicu error getChat
+        if (message.from === 'status@broadcast') {
             return;
         }
 
