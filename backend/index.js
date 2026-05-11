@@ -1404,63 +1404,85 @@ app.post('/api/wa/resync', async (req, res) => {
                     }, { priority: 2, timeout: 40000 });
 
                     // ═══════════════════════════════════════════════════════════════
-                    // [GALI ULANG v7] INTERNAL WA WEB API PAGINATION
+                    // [GALI ULANG v8] VISUAL DOM SCROLL (ANTI-LIMIT)
                     // ═══════════════════════════════════════════════════════════════
-                    // Karena parameter 'before' di fetchMessages diabaikan oleh WA Web
-                    // di versi ini, kita terpaksa menggunakan API internal WA Web
-                    // untuk mensimulasikan "load earlier messages" secara paksa.
+                    // Karena window.Store undefined dan parameter 'before' diabaikan,
+                    // kita gunakan cara paling natural: Buka chat di UI lalu scroll ke atas
+                    // untuk memaksa WhatsApp Web memuat pesan-pesan lama ke DOM.
                     // ═══════════════════════════════════════════════════════════════
-                    emitProgress('resync_progress', { phone_number, message: `Memaksa WA memuat riwayat lama dari ${targetChatId}...` });
+                    emitProgress('resync_progress', { phone_number, message: `Membuka jendela chat ${targetChatId} di browser...` });
 
-                    let loadAttempts = 0;
-                    const MAX_LOAD_ATTEMPTS = 10;
-                    let lastOldestId = null;
-
-                    while (loadAttempts < MAX_LOAD_ATTEMPTS) {
-                        loadAttempts++;
-                        
-                        const loadResult = await client.pupPage.evaluate(async (chatId) => {
-                            try {
-                                const chat = window.Store.Chat.get(chatId);
-                                if (!chat) return 'CHAT_NOT_FOUND';
-                                
-                                const msgs = chat.msgs && chat.msgs.models;
-                                if (!msgs || msgs.length === 0) return 'NO_MSGS';
-                                
-                                const oldestMsg = msgs[0];
-                                
-                                if (window.Store.ConversationMsgs && window.Store.ConversationMsgs.loadEarlierMsgs) {
-                                    await window.Store.ConversationMsgs.loadEarlierMsgs(chat, oldestMsg, false);
-                                    return { status: 'SUCCESS', oldestId: oldestMsg.id._serialized };
-                                }
-                                return { status: 'METHOD_NOT_FOUND' };
-                            } catch (e) {
-                                return { status: 'ERROR', message: e.message };
+                    // 1. Buka chat di UI (klik di sidebar)
+                    const openResult = await client.pupPage.evaluate((chatId) => {
+                        try {
+                            // Cari elemen chat di sidebar yang memiliki data-id berisi chatId
+                            const elements = Array.from(document.querySelectorAll('div[data-id]'));
+                            const chatElem = elements.find(el => el.getAttribute('data-id').includes(chatId));
+                            if (chatElem) {
+                                chatElem.click();
+                                return 'SUCCESS';
                             }
-                        }, targetChatId);
-
-                        console.log(`[RESYNC] 🔄 Load earlier attempt ${loadAttempts}:`, loadResult);
-
-                        if (!loadResult || loadResult.status !== 'SUCCESS') {
-                            console.log(`[RESYNC] 🛑 Berhenti meload karena:`, loadResult);
-                            break;
+                            // Fallback: cari berdasarkan teks jika judulnya nomor
+                            const spans = Array.from(document.querySelectorAll('span[title]'));
+                            const targetSpan = spans.find(s => s.getAttribute('title').includes(chatId.split('@')[0]));
+                            if (targetSpan) {
+                                targetSpan.click();
+                                return 'SUCCESS_VIA_TITLE';
+                            }
+                            return 'CHAT_ELEMENT_NOT_FOUND';
+                        } catch (e) {
+                            return 'ERROR: ' + e.message;
                         }
+                    }, targetChatId);
 
-                        // Cek apakah stuck di ID yang sama (berarti sudah habis di server)
-                        if (lastOldestId === loadResult.oldestId) {
-                            console.log(`[RESYNC] 🛑 Riwayat di server WA sudah habis.`);
-                            break;
+                    console.log(`[RESYNC] 📱 Buka chat result untuk ${targetChatId}:`, openResult);
+
+                    if (openResult.includes('SUCCESS')) {
+                        // Tunggu jendela chat terbuka sempurna
+                        await new Promise(r => setTimeout(r, 2000));
+
+                        // 2. Scroll ke atas beberapa kali untuk memicu loadEarlier
+                        let scrollAttempts = 0;
+                        const MAX_SCROLLS = 5;
+                        emitProgress('resync_progress', { phone_number, message: `Men-scroll riwayat ke atas...` });
+
+                        while (scrollAttempts < MAX_SCROLLS) {
+                            scrollAttempts++;
+                            
+                            const scrolled = await client.pupPage.evaluate(() => {
+                                try {
+                                    // Cari kontainer pesan yang scrollable
+                                    const divs = Array.from(document.querySelectorAll('div'));
+                                    const scrollable = divs.find(el => {
+                                        const style = window.getComputedStyle(el);
+                                        return (style.overflowY === 'scroll' || style.overflowY === 'auto') && 
+                                               el.scrollHeight > el.clientHeight;
+                                    });
+                                    
+                                    if (scrollable) {
+                                        scrollable.scrollTop = 0; // Scroll ke paling atas
+                                        return true;
+                                    }
+                                    return false;
+                                } catch (e) {
+                                    return false;
+                                }
+                            });
+
+                            console.log(`[RESYNC] 📜 Scroll up attempt ${scrollAttempts}:`, scrolled);
+                            if (!scrolled) break;
+
+                            // Tunggu loading spinner WA selesai memuat pesan baru
+                            await new Promise(r => setTimeout(r, 1500));
                         }
-                        lastOldestId = loadResult.oldestId;
-
-                        // Tunggu sebentar agar server WA tidak marah
-                        await new Promise(r => setTimeout(r, 1500));
+                    } else {
+                        console.log(`[RESYNC] ⚠️ Gagal membuka chat di UI, lanjut tarik apa adanya.`);
                     }
 
-                    // Setelah dipaksa load di browser, sekarang kita tarik semua ke Node.js
-                    console.log(`[RESYNC] 📥 Mengambil semua pesan yang berhasil dimuat ke memori...`);
+                    // Setelah dipaksa load via DOM, tarik semua pesan ke Node.js
+                    console.log(`[RESYNC] 📥 Mengambil semua pesan yang berhasil dimuat...`);
                     const allMessagesForTarget = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                        return withTimeout(chat.fetchMessages({ limit: 1500 }), 60000, 'fetchMessages_after_load');
+                        return withTimeout(chat.fetchMessages({ limit: 1500 }), 60000, 'fetchMessages_after_dom_scroll');
                     }, { priority: 2, timeout: 90000 });
 
                     console.log(`[RESYNC] 📊 Total dari ${targetChatId}: ${allMessagesForTarget.length} pesan`);
