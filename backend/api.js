@@ -46,7 +46,7 @@ router.get('/customers', authenticateToken, (req, res) => {
         const { search, status, order, start, end, limit = 1000 } = req.query;
         let query = `
             SELECT c.*, 
-                   (SELECT COUNT(*) FROM media m WHERE m.customer_id = c.id) as media_count
+                   (SELECT COUNT(*) FROM media m WHERE m.customer_id = c.id AND COALESCE(m.excluded_from_production, 0) = 0) as media_count
             FROM customers c
             WHERE 1=1
         `;
@@ -202,7 +202,17 @@ router.post('/customers/:id/drive-sync', authenticateToken, async (req, res) => 
         db.transaction(() => {
             // Ambil detail media
             const placeholders = mediaIds.map(() => '?').join(',');
-            const mediaList = db.prepare(`SELECT * FROM media WHERE id IN (${placeholders})`).all(...mediaIds);
+            const excludedSelected = db.prepare(`
+                SELECT COUNT(*) as c FROM media
+                WHERE id IN (${placeholders})
+                  AND COALESCE(excluded_from_production, 0) = 1
+            `).get(...mediaIds);
+            skipped += excludedSelected ? excludedSelected.c : 0;
+            const mediaList = db.prepare(`
+                SELECT * FROM media
+                WHERE id IN (${placeholders})
+                  AND COALESCE(excluded_from_production, 0) = 0
+            `).all(...mediaIds);
 
             for (const media of mediaList) {
                 // Cek apakah sudah ada di antrean
@@ -263,10 +273,21 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
             const ids = req.query.mediaIds.split(',').filter(Boolean);
             if (ids.length > 0) {
                 const placeholders = ids.map(() => '?').join(',');
-                mediaList = db.prepare(`SELECT * FROM media WHERE customer_id = ? AND id IN (${placeholders}) ORDER BY created_at ASC`).all(req.params.id, ...ids);
+                mediaList = db.prepare(`
+                    SELECT * FROM media
+                    WHERE customer_id = ?
+                      AND id IN (${placeholders})
+                      AND COALESCE(excluded_from_production, 0) = 0
+                    ORDER BY created_at ASC
+                `).all(req.params.id, ...ids);
             }
         } else {
-            mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ? ORDER BY created_at ASC').all(req.params.id);
+            mediaList = db.prepare(`
+                SELECT * FROM media
+                WHERE customer_id = ?
+                  AND COALESCE(excluded_from_production, 0) = 0
+                ORDER BY created_at ASC
+            `).all(req.params.id);
         }
 
         if (mediaList.length === 0) return res.status(404).json({ error: 'Tidak ada foto yang valid untuk didownload' });

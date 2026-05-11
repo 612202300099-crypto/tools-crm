@@ -278,7 +278,11 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                         continue;
                     }
 
-                    const mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ?').all(c.id);
+                    const mediaList = db.prepare(`
+                        SELECT * FROM media
+                        WHERE customer_id = ?
+                          AND COALESCE(excluded_from_production, 0) = 0
+                    `).all(c.id);
                     let pushedDrive = 0;
 
 
@@ -1762,7 +1766,13 @@ app.post('/api/wa/delete-chats', async (req, res) => {
 // ═══════════════════════════════════════════════════════════
 // ENDPOINT API: MANAJEMEN MEDIA (Scan AI & Hapus Massal)
 // ═══════════════════════════════════════════════════════════
-const { scanImageForOrderId, deleteMediaBulk } = require('./services/media_service');
+const {
+    scanImageForOrderId,
+    scanImageBufferForOrderId,
+    markMediaAsOrderProof,
+    continueOrderFlowFromDetectedImage,
+    deleteMediaBulk
+} = require('./services/media_service');
 
 // POST /api/media/scan — Scan satu gambar untuk menemukan Nomor Pesanan via AI Vision
 app.post('/api/media/scan', async (req, res) => {
@@ -1775,7 +1785,7 @@ app.post('/api/media/scan', async (req, res) => {
         // Ambil info media dari database
         const { data: media, error: mediaErr } = await supabase
             .from('media')
-            .select('id, file_name, customer_id')
+            .select('id, file_name, file_url, storage_type, customer_id')
             .eq('id', media_id)
             .single();
 
@@ -1790,24 +1800,37 @@ app.post('/api/media/scan', async (req, res) => {
 
         // Bangun path lokal file
         const filePath = path.join(__dirname, 'uploads', media.file_name);
-        if (!fs.existsSync(filePath)) {
+        if (media.storage_type !== 'object' && !fs.existsSync(filePath)) {
             return res.status(404).json({ error: 'File fisik tidak ditemukan di server. Coba resync terlebih dahulu.' });
         }
 
         console.log(`[MEDIA-SCAN] 🔍 Memindai gambar ${media.file_name} untuk Customer ${customer_id}...`);
-        const result = await scanImageForOrderId(filePath);
+        let result;
+        if (media.storage_type === 'object' && media.file_url) {
+            const response = await fetch(media.file_url, { signal: AbortSignal.timeout(60000) });
+            if (!response.ok) {
+                return res.status(502).json({ error: `Gagal mengambil gambar dari storage: HTTP ${response.status}` });
+            }
+            const buffer = Buffer.from(await response.arrayBuffer());
+            const ext = (media.file_name || media.file_url || 'jpg').split('.').pop();
+            result = await scanImageBufferForOrderId(buffer, ext, { model: 'gpt-4o', detail: 'high' });
+        } else {
+            result = await scanImageForOrderId(filePath);
+        }
 
         if (result.found) {
-            // Otomatis simpan ke database customer
-            await supabase
-                .from('customers')
-                .update({ order_id: result.orderId })
-                .eq('id', customer_id);
+            markMediaAsOrderProof(media.id, result.orderId, 'manual_scan_order_id');
 
-            // Kirim pesan follow-up (ketentuan + link TikTok) via WA
-            const { data: custData } = await supabase.from('customers').select('phone_number').eq('id', customer_id).single();
+            const { data: custData } = await supabase.from('customers').select('*').eq('id', customer_id).single();
             if (custData && isConnected) {
-                await sendPostOrderFollowUp(client, custData.phone_number, result.orderId, supabase);
+                await continueOrderFlowFromDetectedImage({
+                    waClient: client,
+                    supabase,
+                    customer: custData,
+                    orderId: result.orderId,
+                });
+            } else {
+                await supabase.from('customers').update({ order_id: result.orderId }).eq('id', customer_id);
             }
 
             console.log(`[MEDIA-SCAN] ✅ Nomor pesanan ditemukan: ${result.orderId}`);

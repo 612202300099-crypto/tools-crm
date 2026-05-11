@@ -41,6 +41,12 @@ db.exec(`
         file_name    TEXT,
         storage_key  TEXT,  -- Key/path di object storage (sama dengan file_name)
         storage_type TEXT DEFAULT 'local',  -- 'object' atau 'local'
+        excluded_from_production BOOLEAN DEFAULT 0,
+        media_kind TEXT DEFAULT 'customer_photo',
+        detected_order_id TEXT,
+        classification_status TEXT,
+        classification_reason TEXT,
+        classified_at TEXT,
         created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (customer_id) REFERENCES customers(id) ON DELETE CASCADE,
         FOREIGN KEY (message_id)  REFERENCES messages(id)  ON DELETE CASCADE
@@ -104,6 +110,44 @@ if (!existingColumns.includes('photo_followup_count')) {
 
 // ── [MIGRATION] Kolom storage_key & storage_type di tabel media ──────────────
 const mediaColumns = db.prepare('PRAGMA table_info(media)').all().map(c => c.name);
+if (!mediaColumns.includes('excluded_from_production')) {
+    db.exec(`ALTER TABLE media ADD COLUMN excluded_from_production BOOLEAN DEFAULT 0;`);
+    console.log('[DB] Migration: Kolom excluded_from_production ditambahkan ke tabel media.');
+}
+if (!mediaColumns.includes('media_kind')) {
+    db.exec(`ALTER TABLE media ADD COLUMN media_kind TEXT DEFAULT 'customer_photo';`);
+    console.log('[DB] Migration: Kolom media_kind ditambahkan ke tabel media.');
+}
+if (!mediaColumns.includes('detected_order_id')) {
+    db.exec(`ALTER TABLE media ADD COLUMN detected_order_id TEXT;`);
+    console.log('[DB] Migration: Kolom detected_order_id ditambahkan ke tabel media.');
+}
+if (!mediaColumns.includes('classification_status')) {
+    db.exec(`ALTER TABLE media ADD COLUMN classification_status TEXT;`);
+    console.log('[DB] Migration: Kolom classification_status ditambahkan ke tabel media.');
+}
+if (!mediaColumns.includes('classification_reason')) {
+    db.exec(`ALTER TABLE media ADD COLUMN classification_reason TEXT;`);
+    console.log('[DB] Migration: Kolom classification_reason ditambahkan ke tabel media.');
+}
+if (!mediaColumns.includes('classified_at')) {
+    db.exec(`ALTER TABLE media ADD COLUMN classified_at TEXT;`);
+    console.log('[DB] Migration: Kolom classified_at ditambahkan ke tabel media.');
+}
+
+db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_media_customer_production
+        ON media(customer_id, excluded_from_production);
+
+    CREATE TABLE IF NOT EXISTS ai_usage_counters (
+        provider   TEXT NOT NULL,
+        purpose    TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        count      INTEGER DEFAULT 0,
+        updated_at TEXT DEFAULT (datetime('now')),
+        PRIMARY KEY (provider, purpose, window_key)
+    );
+`);
 if (!mediaColumns.includes('storage_key')) {
     db.exec(`ALTER TABLE media ADD COLUMN storage_key TEXT;`);
     console.log('[DB] ✅ Migration: Kolom storage_key ditambahkan ke tabel media.');

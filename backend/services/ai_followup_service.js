@@ -58,6 +58,141 @@ function getAiClient() {
 
 // ─── Utilities ──────────────────────────────────────────────────────────────────
 
+// New provider chain. The old getAiClient remains for compatibility, but chat
+// replies below use this chain so OpenAI is only a controlled backup.
+const _providerClients = new Map();
+const _providerCooldownUntil = new Map();
+
+function boolEnv(name, defaultValue = false) {
+    const raw = process.env[name];
+    if (raw === undefined || raw === null || raw === '') return defaultValue;
+    return ['1', 'true', 'yes', 'on'].includes(String(raw).toLowerCase());
+}
+
+function intEnv(name, defaultValue) {
+    const parsed = parseInt(process.env[name], 10);
+    return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
+function isUsableApiKey(key) {
+    return !!key && !key.includes('ISI_') && !key.includes('fake') && key !== 'sk-test-fake-key';
+}
+
+function getProvider(name) {
+    if (_providerClients.has(name)) return _providerClients.get(name);
+
+    let provider = null;
+    if (name === 'groq' && isUsableApiKey(process.env.GROQ_API_KEY)) {
+        provider = {
+            name: 'groq',
+            label: 'GROQ (Llama)',
+            model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+            client: new OpenAI({
+                apiKey: process.env.GROQ_API_KEY,
+                baseURL: 'https://api.groq.com/openai/v1',
+            }),
+        };
+    } else if (name === 'openai' && isUsableApiKey(process.env.OPENAI_API_KEY)) {
+        provider = {
+            name: 'openai',
+            label: 'OPENAI (fallback)',
+            model: process.env.OPENAI_FALLBACK_MODEL || 'gpt-4o-mini',
+            client: new OpenAI({ apiKey: process.env.OPENAI_API_KEY }),
+        };
+    }
+
+    _providerClients.set(name, provider);
+    if (provider) console.log(`[AI-BOT] Provider siap: ${provider.label} / ${provider.model}`);
+    return provider;
+}
+
+function getProviderChain() {
+    const chain = [];
+    const groq = getProvider('groq');
+    const openai = getProvider('openai');
+    if (groq) chain.push({ ...groq, isFallback: false });
+    if (openai) chain.push({ ...openai, isFallback: !!groq });
+    return chain;
+}
+
+function parseRetryAfterMs(err) {
+    const msg = err.message || '';
+    let waitMs = 5 * 60 * 1000;
+    const match = msg.match(/(\d+)m([\d.]+)s/);
+    if (match) {
+        waitMs = (parseInt(match[1], 10) * 60 + parseFloat(match[2])) * 1000 + 5000;
+    } else {
+        const secMatch = msg.match(/(\d+\.?\d*)s/);
+        if (secMatch) waitMs = parseFloat(secMatch[1]) * 1000 + 5000;
+    }
+    return waitMs;
+}
+
+function isRateLimitError(err) {
+    const msg = err.message || '';
+    return err.status === 429 || msg.includes('429') || msg.includes('Rate limit') || msg.includes('rate_limit');
+}
+
+function isTransientAiError(err) {
+    const msg = err.message || '';
+    return isRateLimitError(err) ||
+        [408, 409, 500, 502, 503, 504].includes(err.status) ||
+        msg.includes('[TIMEOUT]') || msg.toLowerCase().includes('timeout') ||
+        msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') ||
+        msg.includes('fetch failed') || msg.toLowerCase().includes('network');
+}
+
+function usageWindowKey(type, now = new Date()) {
+    const iso = now.toISOString();
+    return type === 'hour' ? iso.slice(0, 13) : iso.slice(0, 10);
+}
+
+function getUsageCount(provider, purpose, windowKey) {
+    try {
+        const db = require('../db');
+        const row = db.prepare(`
+            SELECT count FROM ai_usage_counters
+            WHERE provider = ? AND purpose = ? AND window_key = ?
+        `).get(provider, purpose, windowKey);
+        return row ? row.count : 0;
+    } catch (e) {
+        console.warn('[AI-BOT] Gagal membaca usage counter:', e.message);
+        return 0;
+    }
+}
+
+function incrementUsage(provider, purpose, windowKey) {
+    try {
+        const db = require('../db');
+        db.prepare(`
+            INSERT INTO ai_usage_counters (provider, purpose, window_key, count, updated_at)
+            VALUES (?, ?, ?, 1, datetime('now'))
+            ON CONFLICT(provider, purpose, window_key)
+            DO UPDATE SET count = count + 1, updated_at = datetime('now')
+        `).run(provider, purpose, windowKey);
+    } catch (e) {
+        console.warn('[AI-BOT] Gagal update usage counter:', e.message);
+    }
+}
+
+function canUseOpenAiFallback() {
+    if (!boolEnv('AI_FALLBACK_ENABLED', true)) return { ok: false, reason: 'disabled' };
+    const maxHour = intEnv('OPENAI_FALLBACK_MAX_PER_HOUR', 20);
+    const maxDay = intEnv('OPENAI_FALLBACK_MAX_PER_DAY', 100);
+    const hourKey = usageWindowKey('hour');
+    const dayKey = usageWindowKey('day');
+    const hourCount = getUsageCount('openai', 'chat_fallback_hour', hourKey);
+    const dayCount = getUsageCount('openai', 'chat_fallback_day', dayKey);
+    if (maxHour >= 0 && hourCount >= maxHour) return { ok: false, reason: `hourly limit ${hourCount}/${maxHour}` };
+    if (maxDay >= 0 && dayCount >= maxDay) return { ok: false, reason: `daily limit ${dayCount}/${maxDay}` };
+    return { ok: true, hourKey, dayKey };
+}
+
+function recordOpenAiFallbackUsage(limitInfo) {
+    incrementUsage('openai', 'chat_fallback_hour', limitInfo.hourKey || usageWindowKey('hour'));
+    incrementUsage('openai', 'chat_fallback_day', limitInfo.dayKey || usageWindowKey('day'));
+}
+
 /** Bungkus promise dengan batas waktu agar tidak hang selamanya */
 function withTimeout(promise, ms, label = 'Operation') {
     return Promise.race([
@@ -202,6 +337,77 @@ async function getAIReply(conversationHistory, systemPrompt) {
  *   - Tidak kirim di jam 23:00-07:00 WIB
  *   - Batas max 40 pesan/jam
  */
+async function getAIReplyWithFallback(conversationHistory, systemPrompt) {
+    const messages = [
+        { role: 'system', content: systemPrompt },
+        ...conversationHistory,
+    ];
+
+    const providers = getProviderChain();
+    if (providers.length === 0) {
+        throw new Error('AI client tidak tersedia - periksa GROQ_API_KEY / OPENAI_API_KEY di .env');
+    }
+
+    let lastTransientError = null;
+    for (const provider of providers) {
+        const now = Date.now();
+        const cooldownUntil = _providerCooldownUntil.get(provider.name) || 0;
+        if (now < cooldownUntil) {
+            const waitSec = Math.ceil((cooldownUntil - now) / 1000);
+            console.warn(`[AI-BOT] Provider ${provider.name} cooldown - tunggu ${waitSec}s.`);
+            lastTransientError = new Error(`RATE_LIMITED: ${provider.name} tunggu ${waitSec} detik`);
+            if (!provider.isFallback) continue;
+            throw lastTransientError;
+        }
+
+        let fallbackLimit = null;
+        if (provider.isFallback) {
+            fallbackLimit = canUseOpenAiFallback();
+            if (!fallbackLimit.ok) {
+                console.warn(`[AI-BOT] OpenAI fallback dilewati: ${fallbackLimit.reason}`);
+                throw lastTransientError || new Error(`OPENAI_FALLBACK_LIMITED: ${fallbackLimit.reason}`);
+            }
+        }
+
+        try {
+            const completion = await withTimeout(
+                provider.client.chat.completions.create({
+                    model: provider.model,
+                    messages,
+                    max_tokens: 300,
+                    temperature: 0.7,
+                }),
+                30000,
+                `AI_Provider_${provider.name}_getAIReply`
+            );
+            const reply = completion.choices[0]?.message?.content?.trim();
+            if (!reply) throw new Error('AI returned empty response');
+            if (provider.isFallback) {
+                recordOpenAiFallbackUsage(fallbackLimit);
+                console.warn('[AI-BOT] OpenAI fallback dipakai 1x karena provider utama sedang bermasalah.');
+            }
+            return reply;
+        } catch (err) {
+            if (isRateLimitError(err)) {
+                const waitMs = parseRetryAfterMs(err);
+                _providerCooldownUntil.set(provider.name, Date.now() + waitMs);
+                const readableWait = Math.ceil(waitMs / 1000);
+                console.error(`[AI-BOT] ${provider.name} rate limit. Cooldown ${readableWait}s.`);
+                lastTransientError = new Error(`RATE_LIMITED: ${provider.name} tunggu ${readableWait} detik`);
+                continue;
+            }
+            if (isTransientAiError(err)) {
+                console.warn(`[AI-BOT] ${provider.name} error sementara: ${err.message}`);
+                lastTransientError = err;
+                continue;
+            }
+            throw err;
+        }
+    }
+
+    throw lastTransientError || new Error('Semua provider AI gagal dipakai.');
+}
+
 async function sendWAMessage(waClient, phoneNumber, message) {
     try {
         await outgoingQueue.enqueue(waClient, phoneNumber, message);
@@ -361,7 +567,8 @@ async function handleMediaPhotoCheck(waClient, customer, supabase) {
         const { data: mediaList } = await supabase
             .from('media')
             .select('id')
-            .eq('customer_id', freshCustomer.id);
+            .eq('customer_id', freshCustomer.id)
+            .eq('excluded_from_production', 0);
 
         const currentPhotoCount = mediaList ? mediaList.length : 0;
         const requiredPhotos = freshCustomer.required_photos || 0;
@@ -518,7 +725,7 @@ async function checkAndRespond(waClient, customer, message, supabase) {
                 content: msg.body,
             }));
 
-            const aiReply = await getAIReply(history, config.system_prompt);
+            const aiReply = await getAIReplyWithFallback(history, config.system_prompt);
             await sendWAMessage(waClient, customer.phone_number, aiReply);
             await sendExampleImage(waClient, customer.phone_number, config, supabase, customer);
             return;
@@ -606,6 +813,7 @@ module.exports = {
     withTimeout,
     // Diekspor agar bisa dipakai oleh pending_order_service
     handleOrderFound,
+    handleOrderNotFound,
     handleOrderCancelled,
     sendWAMessageDirect,
 };

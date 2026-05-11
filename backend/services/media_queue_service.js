@@ -390,7 +390,7 @@ class MediaQueueService {
             }
 
             // 5. Simpan ke media (Timeout Guard)
-            const { error: mediaError } = await this.withTimeout(
+            const { data: mediaRecord, error: mediaError } = await this.withTimeout(
                 this.supabase.from('media').insert({
                     customer_id:  job.customerId,
                     message_id:   msgRecord.id,
@@ -399,11 +399,35 @@ class MediaQueueService {
                     storage_key:  storageKey,
                     storage_type: storageType,
                     created_at:   job.timestamp
-                }),
+                }).select().single(),
                 this.dbTimeout, 'insertMediaDB'
             );
 
             if (mediaError) throw new Error(`DB Insert Error: ${mediaError.message}`);
+
+            let excludedFromProduction = false;
+            try {
+                const { autoClassifyOrderImage } = require('./media_service');
+                const classifyResult = await autoClassifyOrderImage({
+                    mediaId: mediaRecord.id,
+                    customerId: job.customerId,
+                    buffer,
+                    ext,
+                    supabase: this.supabase,
+                    waClient: this.client,
+                });
+                if (classifyResult && classifyResult.found) {
+                    excludedFromProduction = true;
+                    console.log(`[W-${workerId}] Foto nomor pesanan terdeteksi (${classifyResult.orderId}) - exclude dari produksi/Drive.`);
+                }
+            } catch (classifyErr) {
+                console.warn(`[W-${workerId}] Auto scan nomor pesanan skip: ${classifyErr.message.substring(0, 80)}`);
+            }
+
+            if (excludedFromProduction) {
+                console.log(`[W-${workerId}] Sukses simpan bukti nomor pesanan. Tidak dihitung sebagai foto produksi.`);
+                return true;
+            }
 
             // 6. Update Status Customer
             await this.withTimeout(
@@ -434,14 +458,14 @@ class MediaQueueService {
                 let photoIndex = 1;
                 try {
                     const { data: prevMedia } = await this.supabase
-                        .from('media').select('id').eq('customer_id', job.customerId);
+                        .from('media').select('id').eq('customer_id', job.customerId).eq('excluded_from_production', 0);
                     photoIndex = prevMedia ? prevMedia.length : 1;
                 } catch (e) {}
 
                 // [FIX] Tidak ada lagi guard `if (custData.order_id)` — queue SELALU
                 driveService.queueUpload({
                     customerId:    job.customerId,
-                    mediaId:       msgRecord.id,
+                    mediaId:       mediaRecord.id,
                     fileUrl:       publicUrl,
                     storageKey,
                     storageType,

@@ -303,6 +303,19 @@ function queueUpload(params) {
 
     try {
         const db = getDb();
+
+        if (mediaId) {
+            const mediaRow = db.prepare(`
+                SELECT excluded_from_production, media_kind
+                FROM media
+                WHERE id = ?
+                LIMIT 1
+            `).get(mediaId);
+            if (mediaRow && mediaRow.excluded_from_production) {
+                console.log(`[DRIVE] Skip antrian: media ${mediaId} adalah ${mediaRow.media_kind || 'excluded'}.`);
+                return;
+            }
+        }
         
         // [FIX] Anti-Duplikat: Jika file_url atau storage_key sudah sukses di-upload, jangan antrikan lagi
         if (fileUrl || storageKey) {
@@ -504,8 +517,10 @@ async function processUploadQueue() {
         pendingItems = db.prepare(`
             SELECT duq.*
             FROM drive_upload_queue duq
+            LEFT JOIN media m ON m.id = duq.media_id
             WHERE duq.status = 'PENDING'
               AND duq.retry_count < duq.max_retries
+              AND COALESCE(m.excluded_from_production, 0) = 0
             ORDER BY duq.created_at DESC
             LIMIT 50
         `).all();

@@ -21,6 +21,10 @@ type Media = {
   id: string;
   file_url: string;
   file_name: string;
+  excluded_from_production?: boolean | number;
+  media_kind?: string | null;
+  detected_order_id?: string | null;
+  classification_status?: string | null;
 };
 
 const WA_API_URL = API_BASE_URL;
@@ -59,6 +63,11 @@ export default function ChatDetail() {
   
   // State untuk status sinkronisasi Drive dari backend
   const [driveStatus, setDriveStatus] = useState<Record<string, string>>({});
+  const isProductionMedia = (media: Media) => !media.excluded_from_production;
+  const selectedProductionIds = () => Array.from(selectedMedia).filter(id => {
+    const media = mediaList.find(m => m.id === id);
+    return media && isProductionMedia(media);
+  });
   useEffect(() => {
     fetchData();
 
@@ -82,6 +91,9 @@ export default function ChatDetail() {
             if (data?.customer_id === customerId) {
                 if (payload.eventType === 'INSERT') {
                     setMediaList(prev => [payload.new as Media, ...prev]);
+                } else if (payload.eventType === 'UPDATE') {
+                    const updated = payload.new as Media;
+                    setMediaList(prev => prev.map(m => m.id === updated.id ? updated : m));
                 } else if (payload.eventType === 'DELETE') {
                     setMediaList(prev => prev.filter(m => m.id !== payload.old.id));
                 }
@@ -325,6 +337,13 @@ export default function ChatDetail() {
         if (data.found) {
             setOrderIdInput(data.order_id);
             setCustomer((prev: any) => ({ ...prev, order_id: data.order_id }));
+            setMediaList(prev => prev.map(m => m.id === mediaId ? {
+                ...m,
+                excluded_from_production: true,
+                media_kind: 'order_proof',
+                detected_order_id: data.order_id,
+                classification_status: 'ORDER_ID_FOUND'
+            } : m));
             setScanResult({ type: 'success', message: `✅ Nomor pesanan ditemukan: ${data.order_id}` });
         } else {
             setScanResult({ type: 'not_found', message: '⚠️ Nomor pesanan (18 digit) tidak ditemukan di gambar ini. Coba pilih gambar lain.' });
@@ -370,13 +389,18 @@ export default function ChatDetail() {
   // ─── FITUR BARU: Manual Push ke Google Drive ────────────────────
   const handleManualDriveSync = async () => {
     if (selectedMedia.size === 0) return;
+    const productionIds = selectedProductionIds();
+    if (productionIds.length === 0) {
+        setScanResult({ type: 'error', message: 'Foto yang dipilih hanya bukti nomor pesanan, jadi tidak dikirim ke Google Drive.' });
+        return;
+    }
 
     setIsSyncingDrive(true);
     setScanResult(null);
 
     try {
         const res = await apiClient.post(`/customers/${customerId}/drive-sync`, { 
-            mediaIds: Array.from(selectedMedia) 
+            mediaIds: productionIds
         });
 
         // apiClient otomatis throw error jika res.data tidak ada atau HTTP error
@@ -405,8 +429,12 @@ export default function ChatDetail() {
   };
 
   const selectAllMedia = () => {
-    if (selectedMedia.size === mediaList.length) setSelectedMedia(new Set()); 
-    else setSelectedMedia(new Set(mediaList.map(m => m.id))); 
+    const productionIds = mediaList.filter(isProductionMedia).map(m => m.id);
+    if (selectedMedia.size === productionIds.length && productionIds.every(id => selectedMedia.has(id))) {
+      setSelectedMedia(new Set());
+    } else {
+      setSelectedMedia(new Set(productionIds));
+    }
   };
 
   const processZipDownload = async () => {
@@ -418,13 +446,19 @@ export default function ChatDetail() {
     const token = localStorage.getItem('access_token');
     if (!token) return alert('Sesi berakhir, silakan login ulang');
 
-    const targetCount = selectedMedia.size > 0 ? selectedMedia.size : mediaList.length;
+    const productionIds = selectedProductionIds();
+    const defaultProductionCount = mediaList.filter(isProductionMedia).length;
+    const targetCount = selectedMedia.size > 0 ? productionIds.length : defaultProductionCount;
+    if (targetCount === 0) {
+       alert('Tidak ada foto produksi untuk di-download. Foto nomor pesanan otomatis dikecualikan.');
+       return;
+    }
     const estimasiDetik = Math.ceil(targetCount * 0.5);
 
     setLoadingMedia(true);
     try {
         const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
-        const mediaParam = selectedMedia.size > 0 ? `?mediaIds=${Array.from(selectedMedia).join(',')}` : '';
+        const mediaParam = selectedMedia.size > 0 ? `?mediaIds=${productionIds.join(',')}` : '';
         
         // [FIX] Tidak pakai AbortSignal.timeout — ZIP 400 foto bisa makan 2-3 menit
         // keepalive: true agar koneksi tidak putus saat tab di-background
@@ -557,10 +591,10 @@ export default function ChatDetail() {
           <div className="p-4 bg-white border-b flex items-center justify-between shadow-sm z-10">
              <div className="font-bold text-gray-800 flex items-center space-x-2">
               <ImageIcon size={18} className="text-blue-600" />
-              <span>Media ({mediaList.length})</span>
+              <span>Media ({mediaList.filter(isProductionMedia).length}/{mediaList.length})</span>
             </div>
             <button onClick={selectAllMedia} className="text-xs text-blue-600 font-bold uppercase tracking-wider hover:text-blue-800 transition">
-              {selectedMedia.size === mediaList.length && mediaList.length > 0 ? 'Deselect All' : 'Select All'}
+              {selectedMedia.size > 0 && selectedProductionIds().length === mediaList.filter(isProductionMedia).length ? 'Deselect All' : 'Select All'}
             </button>
           </div>
           
@@ -580,6 +614,7 @@ export default function ChatDetail() {
              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
                {mediaList.map(media => {
                  const isSelected = selectedMedia.has(media.id);
+                 const isExcluded = !isProductionMedia(media);
                  return (
                    <div 
                      key={media.id} 
@@ -591,6 +626,11 @@ export default function ChatDetail() {
                    >
                      {/* eslint-disable-next-line @next/next/no-img-element */}
                      <img src={media.file_url} className="w-full h-full object-cover transition transform duration-300 group-hover:scale-110" alt="Order file" loading="lazy" />
+                     {isExcluded && (
+                       <div className="absolute inset-x-2 bottom-2 z-10 rounded-lg bg-amber-50/95 border border-amber-200 px-2 py-1 text-[10px] font-black text-amber-800 text-center shadow-sm">
+                         Nomor Pesanan
+                       </div>
+                     )}
                      
                      {/* Indikator Status Drive */}
                      {driveStatus[media.id] && (
@@ -625,7 +665,7 @@ export default function ChatDetail() {
           {/* Footer Media: Download + Scan AI + Hapus */}
           <div className="p-4 border-t bg-white space-y-3 shadow-sm z-10">
              <div className="flex items-center justify-between">
-                <span className="text-sm font-bold text-gray-600 px-3 py-1 bg-gray-100 rounded-lg">{selectedMedia.size} Terpilih</span>
+                <span className="text-sm font-bold text-gray-600 px-3 py-1 bg-gray-100 rounded-lg">{selectedProductionIds().length}/{selectedMedia.size} Produksi</span>
                 <button 
                    onClick={processZipDownload}
                    disabled={loadingMedia || selectedMedia.size === 0}
