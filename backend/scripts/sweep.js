@@ -1,7 +1,7 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 
-const dbPath = path.join(__dirname, '../data/local_cache.db');
+const dbPath = path.join(__dirname, '../database.sqlite');
 const db = new Database(dbPath, { readonly: true });
 
 async function sleep(ms) {
