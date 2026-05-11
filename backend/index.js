@@ -153,76 +153,88 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                     }
 
                     // 2. FETCH HISTORY WA (Gali Ulang otomatis untuk foto yang timeout/terlewat)
-                    const chatId = `${c.phone_number}@c.us`;
+                    let chatIdsToSync = new Set([`${c.phone_number}@c.us`]);
                     try {
-                        // [CRITICAL FIX] Bungkus getChatById dengan timeout 10 detik agar tidak hang 3 menit!
-                        const chat = await chromeSemaphore.acquire('EMERGENCY:getChat', () => {
-                            return withTimeout(client.getChatById(chatId), 10000, 'emergency_getChat');
-                        }, { priority: 2, timeout: 20000 });
+                        const dbMsgs = db.prepare('SELECT wa_id FROM messages WHERE customer_id = ? AND wa_id IS NOT NULL').all(c.id);
+                        for (const msg of dbMsgs) {
+                            const parts = msg.wa_id.split('_');
+                            if (parts.length >= 2) chatIdsToSync.add(parts[1]);
+                        }
+                    } catch (e) {}
 
-                        // [FIX] Limit dinaikkan ke 50 (sebelumnya 15) agar benar-benar menggali pesan secara serius
-                        const messages = await chromeSemaphore.acquire('EMERGENCY:fetch', () => {
-                            return withTimeout(chat.fetchMessages({ limit: 50 }), 20000, 'emergency_fetch');
-                        }, { priority: 2, timeout: 30000 });
-
-                        // [SUPER OPTIMASI] Build cached context
-                        let cachedContext = null;
+                    for (const targetChatId of chatIdsToSync) {
                         try {
-                            let pushname = 'Pelanggan';
+                            // [CRITICAL FIX] Bungkus getChatById dengan timeout 10 detik agar tidak hang 3 menit!
+                            const chat = await chromeSemaphore.acquire('EMERGENCY:getChat', () => {
+                                return withTimeout(client.getChatById(targetChatId), 10000, 'emergency_getChat');
+                            }, { priority: 2, timeout: 20000 });
+
+                            // [FIX] Limit dinaikkan ke 3000 (disamakan dengan Gali Ulang UI) agar dapat seluruh foto!
+                            const messages = await chromeSemaphore.acquire('EMERGENCY:fetch', () => {
+                                return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'emergency_fetch');
+                            }, { priority: 2, timeout: 350000 });
+
+                            // [SUPER OPTIMASI] Build cached context
+                            let cachedContext = null;
                             try {
-                                const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
-                                if (contact && contact.pushname) pushname = contact.pushname;
+                                let pushname = 'Pelanggan';
+                                let lidNet = targetChatId.includes('@lid');
+                                
+                                try {
+                                    const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
+                                    if (contact && contact.pushname) pushname = contact.pushname;
+                                } catch (e) {}
+
+                                cachedContext = {
+                                    chat: chat,
+                                    customerPhoneNumber: c.phone_number,
+                                    contactPushname: pushname,
+                                    isLidNetwork: lidNet
+                                };
                             } catch (e) {}
 
-                            cachedContext = {
-                                chat: chat,
-                                customerPhoneNumber: c.phone_number,
-                                contactPushname: pushname,
-                                isLidNetwork: false
-                            };
-                        } catch (e) {}
+                            let mediaCount = 0;
+                            for (const msg of messages) {
+                                // Ekstrak teks ke database untuk dibaca
+                                if (msg.type === 'chat' && msg.body) {
+                                    db.prepare(`INSERT OR IGNORE INTO messages (id, customer_id, body, is_from_me, created_at) VALUES (?, ?, ?, ?, ?)`)
+                                        .run(msg.id.id, c.id, msg.body, msg.fromMe ? 1 : 0, new Date(msg.timestamp * 1000).toISOString());
 
-                        let mediaCount = 0;
-                        for (const msg of messages) {
-                            // Ekstrak teks ke database untuk dibaca
-                            if (msg.type === 'chat' && msg.body) {
-                                db.prepare(`INSERT OR IGNORE INTO messages (id, customer_id, body, is_from_me, created_at) VALUES (?, ?, ?, ?, ?)`)
-                                    .run(msg.id.id, c.id, msg.body, msg.fromMe ? 1 : 0, new Date(msg.timestamp * 1000).toISOString());
+                                    // [CRITICAL PINTAR] Baca Nomor Order dari pesan pelanggan yang baru digali!
+                                    if (!msg.fromMe && !c.order_id) {
+                                        const orderIdMatch = msg.body.match(/\b\d{10,20}\b/);
+                                        if (orderIdMatch) {
+                                            const foundOrderId = orderIdMatch[0];
+                                            console.log(`[EMERGENCY] 🔎 Ditemukan No Order dari chat lama: ${foundOrderId}`);
+                                            db.prepare('UPDATE customers SET order_id = ? WHERE id = ?').run(foundOrderId, c.id);
+                                            c.order_id = foundOrderId;
 
-                                // [CRITICAL PINTAR] Baca Nomor Order dari pesan pelanggan yang baru digali!
-                                if (!msg.fromMe && !c.order_id) {
-                                    const orderIdMatch = msg.body.match(/\b\d{10,20}\b/);
-                                    if (orderIdMatch) {
-                                        const foundOrderId = orderIdMatch[0];
-                                        console.log(`[EMERGENCY] 🔎 Ditemukan No Order dari chat lama: ${foundOrderId}`);
-                                        db.prepare('UPDATE customers SET order_id = ? WHERE id = ?').run(foundOrderId, c.id);
-                                        c.order_id = foundOrderId;
-
-                                        // Segera cek ke Spreadsheet agar mendapat resi!
-                                        const lookup = await lookupOrder(c.order_id, { bypassCache: true });
-                                        if (lookup && lookup.found) {
-                                            db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
-                                                .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
-                                            c.resi = lookup.resi;
-                                            c.store_name = lookup.storeName;
-                                            c.order_detail = JSON.stringify(lookup.items);
-                                            console.log(`[EMERGENCY] ✅ Berhasil mengaitkan Resi dari chat: ${c.resi}`);
+                                            // Segera cek ke Spreadsheet agar mendapat resi!
+                                            const lookup = await lookupOrder(c.order_id, { bypassCache: true });
+                                            if (lookup && lookup.found) {
+                                                db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
+                                                    .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
+                                                c.resi = lookup.resi;
+                                                c.store_name = lookup.storeName;
+                                                c.order_detail = JSON.stringify(lookup.items);
+                                                console.log(`[EMERGENCY] ✅ Berhasil mengaitkan Resi dari chat: ${c.resi}`);
+                                            }
                                         }
                                     }
                                 }
-                            }
 
-                            // Ekstrak media
-                            if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime() / 1000)) {
-                                await processMessageCommand(msg, true, false, cachedContext); // Pass cachedContext
-                                mediaCount++;
+                                // Ekstrak media
+                                if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime() / 1000)) {
+                                    await processMessageCommand(msg, true, false, cachedContext); // Pass cachedContext
+                                    mediaCount++;
+                                }
                             }
+                            if (mediaCount > 0) {
+                                console.log(`[EMERGENCY] 📸 Berhasil menarik ulang ${mediaCount} media dari titik ${targetChatId}.`);
+                            }
+                        } catch (e) {
+                            console.warn(`[EMERGENCY] ⚠️ Gagal Gali Ulang titik ${targetChatId} untuk ${c.phone_number}: ${e.message}`);
                         }
-                        if (mediaCount > 0) {
-                            console.log(`[EMERGENCY] 📸 Berhasil menarik ulang ${mediaCount} media dari WA.`);
-                        }
-                    } catch (e) {
-                        console.warn(`[EMERGENCY] ⚠️ Gagal Gali Ulang WA untuk ${c.phone_number} (Lewati): ${e.message}`);
                     }
 
                     // 3. MASUKKAN SEMUA MEDIA KE ANTREAN DRIVE (Paced / Terkontrol)
