@@ -1354,9 +1354,9 @@ app.post('/api/wa/global-sweep', async (req, res) => {
                 console.log(`[GLOBAL-SWEEP] 🔍 Menyisir chat: ${chat.name || chat.id.user}`);
                 
                 try {
-                    // Ambil 50 pesan terakhir dari setiap chat
+                    // Ambil 200 pesan terakhir dari setiap chat agar riwayat 2-3 hari lalu aman
                     const historyMessages = await withTimeout(
-                        chromeSemaphore.acquire('API:sweep_fetchMsg', () => chat.fetchMessages({ limit: 50 }), { priority: 3, timeout: 60000 }),
+                        chromeSemaphore.acquire('API:sweep_fetchMsg', () => chat.fetchMessages({ limit: 200 }), { priority: 3, timeout: 60000 }),
                         60000,
                         'fetchMessages_sweep'
                     );
