@@ -409,14 +409,8 @@ async function processUploadQueue() {
         pendingItems = db.prepare(`
             SELECT duq.*
             FROM drive_upload_queue duq
-            LEFT JOIN customers c ON c.id = duq.customer_id
             WHERE duq.status = 'PENDING'
               AND duq.retry_count < duq.max_retries
-              AND (
-                c.photo_confirmed = 1
-                OR c.status = 'SUDAH_KIRIM_FOTO'
-                OR c.id IS NULL
-              )
             ORDER BY duq.created_at DESC
             LIMIT 50
         `).all();
