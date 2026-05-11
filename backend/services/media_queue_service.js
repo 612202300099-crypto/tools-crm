@@ -61,7 +61,7 @@ class MediaQueueService {
         this.downloadTimeout = parseInt(process.env.MEDIA_TIMEOUT_MS) || options.downloadTimeout || 90000;
         this.maxRetries = 3;
         this.dbTimeout = 15000;
-        this.maxQueueSize = parseInt(process.env.MEDIA_MAX_QUEUE) || 300;
+        this.maxQueueSize = parseInt(process.env.MEDIA_MAX_QUEUE) || 3000; // [CRITICAL FIX] Dinaikkan dari 300 ke 3000 agar tidak membuang foto saat antrean panjang!
         this.maxAgeMs = 2 * 60 * 60 * 1000; // 2 jam — item lebih tua pasti gagal
         
         this.queue = this.loadQueue();
