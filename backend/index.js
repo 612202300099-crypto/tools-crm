@@ -764,12 +764,12 @@ client.on('ready', async () => {
     // [OBJECT-STORAGE] Cek koneksi object storage saat startup
     objectStorage.healthCheck().catch(() => { });
 
-    // [STARTUP SYNC] Ambil pesan 48 jam terakhir
-    // setBusy: Watchdog tidak akan restart selama startup sync berjalan
-    // [FIX] 15 menit tidak cukup — log menunjukkan sync bisa >20 menit
-    // Diperpanjang ke 30 menit (max yang diizinkan setBusy)
-    const estimatedSyncMinutes = 30;
-    stability.setBusy(estimatedSyncMinutes * 60 * 1000);
+    // [STARTUP SYNC] DINONAKTIFKAN PERMANEN.
+    // Menjalankan fetchMessages pada ribuan chat saat startup akan membekukan Chrome
+    // sehingga pesan real-time tidak bisa masuk.
+    // Gunakan backend/scripts/sweep.js untuk menyisir pesan secara manual.
+    console.log('[SYNC] Startup Sync dinonaktifkan untuk menjaga kestabilan memori WhatsApp Web.');
+    return;
 
     try {
         let chats = [];
