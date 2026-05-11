@@ -1,4 +1,5 @@
 const chromeSemaphore = require('./chrome_semaphore');
+const outgoingQueue = require('./outgoing_queue_service'); // Anti-spam serial queue
 /**
  * AI Follow-Up Service v2
  * ─────────────────────────────────────────────────────────────
@@ -191,19 +192,28 @@ async function getAIReply(conversationHistory, systemPrompt) {
     }
 }
 
-// ─── Kirim Pesan WA dengan Jitter ────────────────────────────────────────────
+// ─── Kirim Pesan WA via Antrean Anti-Spam ────────────────────────────────────
+/**
+ * Semua pesan bot WAJIB melewati outgoingQueue.
+ * Queue memastikan:
+ *   - Hanya 1 pesan dikirim pada satu waktu (tidak paralel)
+ *   - Jeda natural 5-15 detik antar customer berbeda
+ *   - Cooldown 45 detik per customer
+ *   - Tidak kirim di jam 23:00-07:00 WIB
+ *   - Batas max 40 pesan/jam
+ */
 async function sendWAMessage(waClient, phoneNumber, message) {
-    const chatId = phoneNumber + '@c.us';
-    await humanJitter();
-    // [CHROME-SEM] Priority 3 = AI bot (lowest — jangan ganggu download/incoming)
-    await chromeSemaphore.acquire('AI:sendMessage', () => {
-        return withTimeout(
-            waClient.sendMessage(chatId, message),
-            60000,
-            'WA_sendMessage'
-        );
-    }, { priority: 3, timeout: 120000 });
-    console.log(`[AI-BOT] 💬 Pesan terkirim ke ${phoneNumber}: "${message.substring(0, 60)}..."`);
+    try {
+        await outgoingQueue.enqueue(waClient, phoneNumber, message);
+        console.log(`[AI-BOT] 💬 Pesan diantrekan → ${phoneNumber}: "${message.substring(0, 50)}..."`);
+    } catch (err) {
+        // HOURLY_LIMIT atau QUEUE_FULL tidak perlu throw — cukup log
+        if (err.message === 'HOURLY_LIMIT_REACHED' || err.message === 'QUEUE_FULL') {
+            console.warn(`[AI-BOT] ⏭️ Pesan ke ${phoneNumber} dilewati: ${err.message}`);
+            return;
+        }
+        throw err;
+    }
 }
 
 // ─── Kirim Gambar Contoh (Hanya Sekali di Awal) ──────────────────────────────
