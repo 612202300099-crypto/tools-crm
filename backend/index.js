@@ -1404,53 +1404,107 @@ app.post('/api/wa/resync', async (req, res) => {
                     }, { priority: 2, timeout: 40000 });
 
                     // ═══════════════════════════════════════════════════════════════
-                    // [GALI ULANG v8] VISUAL DOM SCROLL (ANTI-LIMIT)
+                    // [GALI ULANG v9] DOUBLE-ATTEMPT OPEN CHAT (SEARCH & SIDEBAR)
                     // ═══════════════════════════════════════════════════════════════
-                    // Karena window.Store undefined dan parameter 'before' diabaikan,
-                    // kita gunakan cara paling natural: Buka chat di UI lalu scroll ke atas
-                    // untuk memaksa WhatsApp Web memuat pesan-pesan lama ke DOM.
+                    // Untuk mengatasi chat yang tidak ada di daftar sidebar teratas,
+                    // kita coba cari via Search Box dulu. Jika gagal, baru sisir sidebar.
                     // ═══════════════════════════════════════════════════════════════
-                    emitProgress('resync_progress', { phone_number, message: `Membuka jendela chat ${targetChatId} di browser...` });
+                    let openResult = 'NOT_ATTEMPTED';
 
-                    // 1. Buka chat di UI (klik di sidebar)
-                    const openResult = await client.pupPage.evaluate((chatId) => {
-                        try {
-                            const phonePart = chatId.split('@')[0];
-                            
-                            // Cara 1: Cari berdasarkan data-id (paling akurat)
-                            const elements = Array.from(document.querySelectorAll('div[data-id]'));
-                            const chatElem = elements.find(el => el.getAttribute('data-id').includes(chatId));
-                            if (chatElem) {
-                                chatElem.click();
-                                return 'SUCCESS_DATA_ID';
+                    // 🛠️ CARA 1: Gunakan Kolom Pencarian (Search Box)
+                    try {
+                        emitProgress('resync_progress', { phone_number, message: `Mencari chat ${phone_number} via kolom pencarian...` });
+                        
+                        const searchStatus = await client.pupPage.evaluate(async (phone) => {
+                            try {
+                                const searchBox = document.querySelector('div[contenteditable="true"][data-tab="3"]') || 
+                                                  document.querySelector('div[title="Search or start new chat"]') ||
+                                                  document.querySelector('div[aria-label="Search or start new chat"]');
+                                                  
+                                if (!searchBox) return 'NO_SEARCH_BOX';
+                                
+                                searchBox.focus();
+                                document.execCommand('selectAll', false, null);
+                                document.execCommand('delete', false, null);
+                                document.execCommand('insertText', false, phone);
+                                
+                                return 'TYPED';
+                            } catch (e) {
+                                return 'ERROR: ' + e.message;
                             }
+                        }, phone_number);
+
+                        console.log(`[RESYNC] 🔍 Search box status:`, searchStatus);
+
+                        if (searchStatus === 'TYPED') {
+                            // Tunggu hasil pencarian muncul di layar
+                            await new Promise(r => setTimeout(r, 2500));
                             
-                            // Cara 2: Cari berdasarkan teks nomor telepon di semua span
-                            const spans = Array.from(document.querySelectorAll('span'));
-                            const targetSpan = spans.find(s => s.innerText && s.innerText.includes(phonePart));
-                            if (targetSpan) {
-                                // Cari parent yang bisa diklik (biasanya punya data-id atau role="row")
-                                let el = targetSpan;
-                                for (let i = 0; i < 7; i++) {
-                                    if (el.hasAttribute('data-id') || el.getAttribute('role') === 'row') {
-                                        el.click();
-                                        return 'SUCCESS_DOM_PARENT';
+                            const clickStatus = await client.pupPage.evaluate((phone) => {
+                                try {
+                                    // Cari di hasil pencarian yang muncul
+                                    const elements = Array.from(document.querySelectorAll('div[data-id]'));
+                                    const chatElem = elements.find(el => el.getAttribute('data-id').includes(phone));
+                                    if (chatElem) {
+                                        chatElem.click();
+                                        return 'SUCCESS_SEARCH_CLICK';
                                     }
-                                    if (el.parentElement) el = el.parentElement;
-                                    else break;
+                                    return 'SEARCH_RESULT_NOT_FOUND';
+                                } catch (e) {
+                                    return 'ERROR_CLICK: ' + e.message;
                                 }
-                                // Jika tidak ketemu parent khusus, klik langsung teksnya
-                                targetSpan.click();
-                                return 'SUCCESS_DIRECT_SPAN';
-                            }
+                            }, phone_number);
                             
-                            return 'CHAT_ELEMENT_NOT_FOUND';
-                        } catch (e) {
-                            return 'ERROR: ' + e.message;
+                            console.log(`[RESYNC] 📱 Click search result status:`, clickStatus);
+                            if (clickStatus === 'SUCCESS_SEARCH_CLICK') {
+                                openResult = 'SUCCESS_VIA_SEARCH';
+                            }
                         }
-                    }, targetChatId);
+                    } catch (searchErr) {
+                        console.log(`[RESYNC] ⚠️ Gagal metode search box:`, searchErr.message);
+                    }
 
-                    console.log(`[RESYNC] 📱 Buka chat result untuk ${targetChatId}:`, openResult);
+                    // 🛠️ CARA 2: Sisir Sidebar (Jika Cara 1 gagal)
+                    if (!openResult.includes('SUCCESS')) {
+                        emitProgress('resync_progress', { phone_number, message: `Chat tidak ketemu di pencarian. Menyisir sidebar secara agresif...` });
+                        
+                        openResult = await client.pupPage.evaluate((chatId) => {
+                            try {
+                                const phonePart = chatId.split('@')[0];
+                                
+                                // Sub-Cara A: Cari berdasarkan data-id
+                                const elements = Array.from(document.querySelectorAll('div[data-id]'));
+                                const chatElem = elements.find(el => el.getAttribute('data-id').includes(chatId));
+                                if (chatElem) {
+                                    chatElem.click();
+                                    return 'SUCCESS_DATA_ID';
+                                }
+                                
+                                // Sub-Cara B: Cari berdasarkan teks nomor di semua span
+                                const spans = Array.from(document.querySelectorAll('span'));
+                                const targetSpan = spans.find(s => s.innerText && s.innerText.includes(phonePart));
+                                if (targetSpan) {
+                                    let el = targetSpan;
+                                    for (let i = 0; i < 7; i++) {
+                                        if (el.hasAttribute('data-id') || el.getAttribute('role') === 'row') {
+                                            el.click();
+                                            return 'SUCCESS_DOM_PARENT';
+                                        }
+                                        if (el.parentElement) el = el.parentElement;
+                                        else break;
+                                    }
+                                    targetSpan.click();
+                                    return 'SUCCESS_DIRECT_SPAN';
+                                }
+                                
+                                return 'CHAT_ELEMENT_NOT_FOUND';
+                            } catch (e) {
+                                return 'ERROR: ' + e.message;
+                            }
+                        }, targetChatId);
+                        
+                        console.log(`[RESYNC] 📱 Hasil sisir sidebar untuk ${targetChatId}:`, openResult);
+                    }
 
                     if (openResult.includes('SUCCESS')) {
                         // Tunggu jendela chat terbuka sempurna
