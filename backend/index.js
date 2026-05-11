@@ -1415,20 +1415,35 @@ app.post('/api/wa/resync', async (req, res) => {
                     // 1. Buka chat di UI (klik di sidebar)
                     const openResult = await client.pupPage.evaluate((chatId) => {
                         try {
-                            // Cari elemen chat di sidebar yang memiliki data-id berisi chatId
+                            const phonePart = chatId.split('@')[0];
+                            
+                            // Cara 1: Cari berdasarkan data-id (paling akurat)
                             const elements = Array.from(document.querySelectorAll('div[data-id]'));
                             const chatElem = elements.find(el => el.getAttribute('data-id').includes(chatId));
                             if (chatElem) {
                                 chatElem.click();
-                                return 'SUCCESS';
+                                return 'SUCCESS_DATA_ID';
                             }
-                            // Fallback: cari berdasarkan teks jika judulnya nomor
-                            const spans = Array.from(document.querySelectorAll('span[title]'));
-                            const targetSpan = spans.find(s => s.getAttribute('title').includes(chatId.split('@')[0]));
+                            
+                            // Cara 2: Cari berdasarkan teks nomor telepon di semua span
+                            const spans = Array.from(document.querySelectorAll('span'));
+                            const targetSpan = spans.find(s => s.innerText && s.innerText.includes(phonePart));
                             if (targetSpan) {
+                                // Cari parent yang bisa diklik (biasanya punya data-id atau role="row")
+                                let el = targetSpan;
+                                for (let i = 0; i < 7; i++) {
+                                    if (el.hasAttribute('data-id') || el.getAttribute('role') === 'row') {
+                                        el.click();
+                                        return 'SUCCESS_DOM_PARENT';
+                                    }
+                                    if (el.parentElement) el = el.parentElement;
+                                    else break;
+                                }
+                                // Jika tidak ketemu parent khusus, klik langsung teksnya
                                 targetSpan.click();
-                                return 'SUCCESS_VIA_TITLE';
+                                return 'SUCCESS_DIRECT_SPAN';
                             }
+                            
                             return 'CHAT_ELEMENT_NOT_FOUND';
                         } catch (e) {
                             return 'ERROR: ' + e.message;
