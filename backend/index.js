@@ -1298,17 +1298,37 @@ app.post('/api/wa/resync', async (req, res) => {
                 return;
             }
 
-            const chatId = phone_number + '@c.us';
+            // [UPGRADE GALI ULANG] - Resolusi Chat ID yang sebenarnya (LID vs C.US)
+            let realChatId = phone_number + '@c.us';
+            try {
+                const { data: dbMsg } = await supabase.from('messages')
+                    .select('wa_id')
+                    .eq('customer_id', customer_id)
+                    .not('wa_id', 'is', null)
+                    .limit(1);
+                    
+                if (dbMsg && dbMsg.length > 0 && dbMsg[0].wa_id) {
+                    const parts = dbMsg[0].wa_id.split('_');
+                    if (parts.length >= 2) {
+                        realChatId = parts[1]; // Dapatkan format asli (misal: xxxx@lid atau xxxx@c.us)
+                        console.log(`[RESYNC] 🎯 Real Chat ID ditemukan: ${realChatId}`);
+                    }
+                }
+            } catch (e) {
+                console.warn('[RESYNC] ⚠️ Gagal melacak Real Chat ID dari DB, fallback ke standar.');
+            }
+
             // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
             const chat = await chromeSemaphore.acquire('API:resync_getChat', () => {
-                return withTimeout(client.getChatById(chatId), 30000, 'getChatById_resync');
+                return withTimeout(client.getChatById(realChatId), 30000, 'getChatById_resync');
             }, { priority: 2, timeout: 40000 });
 
-            console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number}`);
+            console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number} (Chat ID: ${realChatId})`);
             const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                // Gunakan 200 agar konsisten dan lebih aman dari blokir
-                return withTimeout(chat.fetchMessages({ limit: 200 }), 120000, 'fetchMessages_resync');
-            }, { priority: 2, timeout: 150000 });
+                // [UPGRADE] Gunakan limit 3000 untuk memastikan pesan dari berhari-hari lalu (seperti foto ratusan) tetap terjangkau.
+                // Tingkatkan juga timeout menjadi 5 menit (300000ms) karena penarikan data lama butuh waktu lebih.
+                return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'fetchMessages_resync');
+            }, { priority: 2, timeout: 350000 });
 
             let count = 0;
             for (const msg of historyMessages) {
