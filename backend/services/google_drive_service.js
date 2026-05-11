@@ -460,6 +460,41 @@ async function processUploadQueue() {
         console.warn('[DRIVE] ⚠️ Error cek WAITING_RESI:', e.message);
     }
 
+    // 1.5. [NEW] Healing Pass untuk item PENDING yang datanya cacat (akibat bug lama)
+    try {
+        const incompleteList = db.prepare(`
+            SELECT duq.id, duq.customer_id, c.resi, c.store_name, c.order_detail
+            FROM drive_upload_queue duq
+            JOIN customers c ON c.id = duq.customer_id
+            WHERE duq.status = 'PENDING' 
+              AND (duq.store_name IS NULL OR duq.store_name = '' OR duq.resi IS NULL OR duq.resi = '')
+              AND c.resi IS NOT NULL AND c.resi != ''
+              AND c.store_name IS NOT NULL AND c.store_name != ''
+        `).all();
+
+        for (const item of incompleteList) {
+            let productAbbr = 'LAINNYA';
+            let sku = '';
+            try {
+                const detail = JSON.parse(item.order_detail || '[]');
+                const mainItem = detail.find(i => i.isPolaroid) || detail[0];
+                if (mainItem) {
+                    productAbbr = mainItem.productAbbr || 'LAINNYA';
+                    sku = mainItem.sku || '';
+                }
+            } catch (e) { /* silent */ }
+
+            db.prepare(`
+                UPDATE drive_upload_queue
+                SET resi = ?, store_name = ?, product_abbr = ?, sku = ?
+                WHERE id = ?
+            `).run(item.resi, item.store_name, productAbbr, sku, item.id);
+            console.log(`[DRIVE] 🩹 HEALED incomplete PENDING: customer ${item.customer_id} (resi: ${item.resi})`);
+        }
+    } catch (e) {
+        console.warn('[DRIVE] ⚠️ Error healing incomplete PENDING:', e.message);
+    }
+
     // 2. Ambil PENDING items (max 10 per batch)
     // [FIX] Hanya proses foto dari customer yang SUDAH KONFIRMASI (photo_confirmed=1)
     // Ini mencegah upload foto ke Drive sebelum customer selesai kirim semua foto.
