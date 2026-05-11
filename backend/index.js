@@ -1404,62 +1404,66 @@ app.post('/api/wa/resync', async (req, res) => {
                     }, { priority: 2, timeout: 40000 });
 
                     // ═══════════════════════════════════════════════════════════════
-                    // [GALI ULANG v6] ROBUST PAGINATION (SCROLL UP SIMULATION)
+                    // [GALI ULANG v7] INTERNAL WA WEB API PAGINATION
                     // ═══════════════════════════════════════════════════════════════
-                    // Mengambil pesan dalam potongan (chunks) dan mundur ke belakang
-                    // menggunakan parameter 'before' untuk memaksa WA memuat pesan lama.
+                    // Karena parameter 'before' di fetchMessages diabaikan oleh WA Web
+                    // di versi ini, kita terpaksa menggunakan API internal WA Web
+                    // untuk mensimulasikan "load earlier messages" secara paksa.
                     // ═══════════════════════════════════════════════════════════════
-                    emitProgress('resync_progress', { phone_number, message: `Memuat riwayat mendalam dari ${targetChatId}... Mohon tunggu.` });
+                    emitProgress('resync_progress', { phone_number, message: `Memaksa WA memuat riwayat lama dari ${targetChatId}...` });
 
-                    let allMessagesForTarget = [];
-                    let oldestMsgId = null;
-                    let hasMore = true;
-                    let attempts = 0;
-                    const MAX_ATTEMPTS = 15; // 15 * 100 = ~1500 pesan per target
+                    let loadAttempts = 0;
+                    const MAX_LOAD_ATTEMPTS = 10;
+                    let lastOldestId = null;
 
-                    while (hasMore && attempts < MAX_ATTEMPTS) {
-                        attempts++;
-                        const options = { limit: 100 };
-                        if (oldestMsgId) {
-                            options.before = oldestMsgId;
-                        }
-
-                        const chunk = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                            return withTimeout(chat.fetchMessages(options), 45000, `fetchMessages_chunk_${attempts}`);
-                        }, { priority: 2, timeout: 60000 });
-
-                        if (!chunk || chunk.length === 0) {
-                            hasMore = false;
-                            break;
-                        }
-
-                        console.log(`[RESYNC] 📜 Chunk ${attempts}: ${chunk.length} pesan dimuat dari ${targetChatId}`);
-
-                        // Tambahkan ke penampung
-                        allMessagesForTarget = [...chunk, ...allMessagesForTarget];
-
-                        // Update oldestMsgId untuk iterasi berikutnya (chunk[0] adalah yang tertua)
-                        const currentOldestId = chunk[0].id._serialized;
+                    while (loadAttempts < MAX_LOAD_ATTEMPTS) {
+                        loadAttempts++;
                         
-                        // Cek apakah kita stuck (library mengembalikan data yang sama)
-                        if (oldestMsgId === currentOldestId) {
-                            console.log(`[RESYNC] 🛑 Pagination stuck di ID yang sama. Berhenti.`);
+                        const loadResult = await client.pupPage.evaluate(async (chatId) => {
+                            try {
+                                const chat = window.Store.Chat.get(chatId);
+                                if (!chat) return 'CHAT_NOT_FOUND';
+                                
+                                const msgs = chat.msgs && chat.msgs.models;
+                                if (!msgs || msgs.length === 0) return 'NO_MSGS';
+                                
+                                const oldestMsg = msgs[0];
+                                
+                                if (window.Store.ConversationMsgs && window.Store.ConversationMsgs.loadEarlierMsgs) {
+                                    await window.Store.ConversationMsgs.loadEarlierMsgs(chat, oldestMsg, false);
+                                    return { status: 'SUCCESS', oldestId: oldestMsg.id._serialized };
+                                }
+                                return { status: 'METHOD_NOT_FOUND' };
+                            } catch (e) {
+                                return { status: 'ERROR', message: e.message };
+                            }
+                        }, targetChatId);
+
+                        console.log(`[RESYNC] 🔄 Load earlier attempt ${loadAttempts}:`, loadResult);
+
+                        if (!loadResult || loadResult.status !== 'SUCCESS') {
+                            console.log(`[RESYNC] 🛑 Berhenti meload karena:`, loadResult);
                             break;
                         }
-                        
-                        oldestMsgId = currentOldestId;
 
-                        // Jika chunk kurang dari limit, berarti sudah habis di server
-                        if (chunk.length < 100) {
-                            hasMore = false;
+                        // Cek apakah stuck di ID yang sama (berarti sudah habis di server)
+                        if (lastOldestId === loadResult.oldestId) {
+                            console.log(`[RESYNC] 🛑 Riwayat di server WA sudah habis.`);
                             break;
                         }
+                        lastOldestId = loadResult.oldestId;
 
-                        // Beri jeda sedikit agar tidak dianggap spam oleh server WA
-                        await new Promise(r => setTimeout(r, 500));
+                        // Tunggu sebentar agar server WA tidak marah
+                        await new Promise(r => setTimeout(r, 1500));
                     }
 
-                    console.log(`[RESYNC] 📊 Total awal dari ${targetChatId}: ${allMessagesForTarget.length} pesan`);
+                    // Setelah dipaksa load di browser, sekarang kita tarik semua ke Node.js
+                    console.log(`[RESYNC] 📥 Mengambil semua pesan yang berhasil dimuat ke memori...`);
+                    const allMessagesForTarget = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
+                        return withTimeout(chat.fetchMessages({ limit: 1500 }), 60000, 'fetchMessages_after_load');
+                    }, { priority: 2, timeout: 90000 });
+
+                    console.log(`[RESYNC] 📊 Total dari ${targetChatId}: ${allMessagesForTarget.length} pesan`);
 
                     // Build cached context SEKALI saja sebelum loop pemrosesan
                     let cachedContext = null;
