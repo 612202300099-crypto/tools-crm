@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const db = require('./db');
 const fs = require('fs');
 const path = require('path');
+const archiver = require('archiver'); // ZIP generator — must be top-level CJS require
 
 const router = express.Router();
 const JWT_SECRET = process.env.JWT_SECRET || 'crm-super-secret-key-2026';
@@ -277,18 +278,8 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
         res.setHeader('Content-Type', 'application/zip');
         res.setHeader('Transfer-Encoding', 'chunked');
 
-        // archiver adalah CommonJS package — gunakan require() biasa
-        // (dynamic import hanya diperlukan untuk pure ESM package)
-        let archiver;
-        try {
-            archiver = require('archiver');
-        } catch (e) {
-            // Fallback: dynamic import jika require gagal
-            const mod = await import('archiver');
-            archiver = mod.default || mod;
-        }
         const archive = archiver('zip', {
-            zlib: { level: 1 } // Level 1 (fastest) karena JPEG sudah terkompresi
+            zlib: { level: 1 }
         });
 
         archive.on('error', (err) => {
