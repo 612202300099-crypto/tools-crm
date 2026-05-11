@@ -1230,8 +1230,8 @@ app.post('/api/wa/resync', async (req, res) => {
             
             // [CRITICAL FIX] withTimeout harus DI DALAM acquire!
             const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                return withTimeout(chat.fetchMessages({ limit: 100 }), 45000, 'fetchMessages_resync');
-            }, { priority: 2, timeout: 60000 });
+                return withTimeout(chat.fetchMessages({ limit: 1000 }), 120000, 'fetchMessages_resync');
+            }, { priority: 2, timeout: 150000 });
 
             let count = 0;
             for (const msg of historyMessages) {
