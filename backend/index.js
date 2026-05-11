@@ -164,27 +164,59 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
 
                     for (const targetChatId of chatIdsToSync) {
                         try {
-                            // [CRITICAL FIX] Bungkus getChatById dengan timeout 10 detik agar tidak hang 3 menit!
                             const chat = await chromeSemaphore.acquire('EMERGENCY:getChat', () => {
                                 return withTimeout(client.getChatById(targetChatId), 10000, 'emergency_getChat');
                             }, { priority: 2, timeout: 20000 });
 
-                            // [FIX] Limit dinaikkan ke 3000 (disamakan dengan Gali Ulang UI) agar dapat seluruh foto!
-                            const messages = await chromeSemaphore.acquire('EMERGENCY:fetch', () => {
-                                return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'emergency_fetch');
-                            }, { priority: 2, timeout: 350000 });
+                            // ── DEEP PAGINATION (sama seperti Gali Ulang UI) ──────────────────
+                            // fetchMessages biasa hanya baca RAM browser → lewatkan foto lama.
+                            // loadEarlierMessages() = "scroll ke atas" → muat dari server WA.
+                            let allMessages = await chromeSemaphore.acquire('EMERGENCY:fetch_init', () => {
+                                return withTimeout(chat.fetchMessages({ limit: 100 }), 60000, 'emergency_fetch_init');
+                            }, { priority: 2, timeout: 90000 });
 
-                            // [SUPER OPTIMASI] Build cached context
+                            let prevCount = 0;
+                            let emIter = 0;
+                            const EM_MAX_ITER = 40;
+
+                            while (emIter < EM_MAX_ITER) {
+                                emIter++;
+                                prevCount = allMessages.length;
+                                try {
+                                    const hasMore = await chromeSemaphore.acquire('EMERGENCY:loadEarlier', () => {
+                                        return withTimeout(chat.loadEarlierMessages(), 25000, 'emergency_loadEarlier');
+                                    }, { priority: 2, timeout: 35000 });
+
+                                    const refreshed = await chromeSemaphore.acquire('EMERGENCY:fetch_refresh', () => {
+                                        return withTimeout(chat.fetchMessages({ limit: 5000 }), 120000, 'emergency_fetch_refresh');
+                                    }, { priority: 2, timeout: 150000 });
+
+                                    const newFound = refreshed.length - prevCount;
+                                    if (newFound > 0) allMessages = refreshed;
+
+                                    const mediaFoundSoFar = allMessages.filter(m => m.hasMedia && !m.fromMe).length;
+                                    console.log(`[EMERGENCY] 📜 Iter ${emIter}: ${allMessages.length} pesan (+${newFound}) | ${mediaFoundSoFar} foto`);
+
+                                    if (!hasMore || newFound === 0) break;
+                                    if (mediaFoundSoFar >= 500) break;
+                                    await new Promise(r => setTimeout(r, 600));
+                                } catch (loadErr) {
+                                    console.warn(`[EMERGENCY] ⚠️ loadEarlier iter ${emIter} gagal:`, loadErr.message);
+                                    break;
+                                }
+                            }
+
+                            console.log(`[EMERGENCY] 📊 ${c.phone_number}@${targetChatId}: ${allMessages.length} pesan total`);
+
+                            // Build cached context
                             let cachedContext = null;
                             try {
                                 let pushname = 'Pelanggan';
                                 let lidNet = targetChatId.includes('@lid');
-                                
                                 try {
                                     const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
                                     if (contact && contact.pushname) pushname = contact.pushname;
                                 } catch (e) {}
-
                                 cachedContext = {
                                     chat: chat,
                                     customerPhoneNumber: c.phone_number,
@@ -194,7 +226,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                             } catch (e) {}
 
                             let mediaCount = 0;
-                            for (const msg of messages) {
+                            for (const msg of allMessages) {
                                 // Ekstrak teks ke database untuk dibaca
                                 if (msg.type === 'chat' && msg.body) {
                                     db.prepare(`INSERT OR IGNORE INTO messages (id, customer_id, body, is_from_me, created_at) VALUES (?, ?, ?, ?, ?)`)
@@ -225,15 +257,15 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
 
                                 // Ekstrak media
                                 if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime() / 1000)) {
-                                    await processMessageCommand(msg, true, false, cachedContext); // Pass cachedContext
+                                    await processMessageCommand(msg, true, false, cachedContext);
                                     mediaCount++;
                                 }
                             }
                             if (mediaCount > 0) {
-                                console.log(`[EMERGENCY] 📸 Berhasil menarik ulang ${mediaCount} media dari titik ${targetChatId}.`);
+                                console.log(`[EMERGENCY] 📸 ${mediaCount} media dari ${targetChatId} masuk antrean.`);
                             }
                         } catch (e) {
-                            console.warn(`[EMERGENCY] ⚠️ Gagal Gali Ulang titik ${targetChatId} untuk ${c.phone_number}: ${e.message}`);
+                            console.warn(`[EMERGENCY] ⚠️ Gagal Gali titik ${targetChatId} untuk ${c.phone_number}: ${e.message}`);
                         }
                     }
 
