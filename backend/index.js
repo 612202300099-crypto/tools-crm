@@ -1328,6 +1328,60 @@ app.post('/api/wa/resync', async (req, res) => {
 });
 
 
+app.post('/api/wa/global-sweep', async (req, res) => {
+    res.json({ success: true, message: 'Global Sweep dimulai di latar belakang. Proses ini akan menyisir semua chat aktif dan menarik foto yang terlewat.' });
+
+    setImmediate(async () => {
+        try {
+            console.log(`[GLOBAL-SWEEP] 🌍 Memulai penyisiran massal ke semua chat...`);
+            
+            // Ambil semua chat yang ada di sidebar WhatsApp Web
+            const chats = await withTimeout(
+                chromeSemaphore.acquire('API:getChats', () => client.getChats(), { priority: 2, timeout: 60000 }),
+                60000,
+                'getChats_global'
+            );
+
+            console.log(`[GLOBAL-SWEEP] Ditemukan ${chats.length} chat. Mulai memfilter dan menyisir...`);
+
+            let processedChats = 0;
+            let totalMediaProcessed = 0;
+
+            for (const chat of chats) {
+                // Abaikan grup dan broadcast
+                if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
+
+                console.log(`[GLOBAL-SWEEP] 🔍 Menyisir chat: ${chat.name || chat.id.user}`);
+                
+                try {
+                    // Ambil 50 pesan terakhir dari setiap chat
+                    const historyMessages = await withTimeout(
+                        chromeSemaphore.acquire('API:sweep_fetchMsg', () => chat.fetchMessages({ limit: 50 }), { priority: 3, timeout: 60000 }),
+                        60000,
+                        'fetchMessages_sweep'
+                    );
+
+                    for (const msg of historyMessages) {
+                        // Prioritaskan hanya pesan yang memiliki media (foto/video/dokumen)
+                        if (msg.hasMedia) {
+                            await processMessageCommand(msg, true, false);
+                            totalMediaProcessed++;
+                        }
+                    }
+                    processedChats++;
+                } catch (err) {
+                    console.error(`[GLOBAL-SWEEP] ⚠️ Lewati chat ${chat.id.user}:`, err.message);
+                }
+            }
+
+            console.log(`[GLOBAL-SWEEP] ✅ SELESAI! Berhasil menyisir ${processedChats} chat dan memproses ${totalMediaProcessed} media terlewat.`);
+        } catch (err) {
+            console.error(`[GLOBAL-SWEEP] ❌ Gagal total:`, err.message);
+        }
+    });
+});
+
+
 app.post('/api/wa/delete-chats', async (req, res) => {
     // API ini berjalan MURNI mengelola manipulasi File & Database (tidak perlu mengecek isConnected WA).
     const { customer_ids } = req.body;
