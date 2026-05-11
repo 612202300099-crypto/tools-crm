@@ -275,17 +275,19 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
 
         res.attachment(zipFilename);
         res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Transfer-Encoding', 'chunked');
 
-        // Gunakan dynamic import karena archiver versi terbaru adalah ES Module
-        const { ZipArchive } = await import('archiver');
-
-        const archive = new ZipArchive({
+        // [FIX] archiver v8 adalah ESM — gunakan dynamic import dengan .default
+        // require('archiver') TIDAK bekerja karena ini ESM package
+        const archiverModule = await import('archiver');
+        const archiver = archiverModule.default || archiverModule;
+        const archive = archiver('zip', {
             zlib: { level: 1 } // Level 1 (fastest) karena JPEG sudah terkompresi
         });
 
         archive.on('error', (err) => {
-            console.error('[API] Archiver error:', err);
-            res.status(500).end();
+            console.error('[API] Archiver error:', err.message);
+            if (!res.headersSent) res.status(500).end();
         });
 
         // Pipe archive stream langsung ke response HTTP (Streaming)
@@ -293,47 +295,56 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
 
         for (let i = 0; i < mediaList.length; i++) {
             const media = mediaList[i];
-            const ext = media.file_url.split('.').pop().split('?')[0] || 'jpg';
-            const fileName = `foto_${i + 1}.${ext}`;
+            const rawExt = (media.file_url || '').split('.').pop().split('?')[0];
+            const ext = ['jpg','jpeg','png','webp','heic','gif','mp4'].includes(rawExt?.toLowerCase()) ? rawExt : 'jpg';
+            const fileName = `foto_${String(i + 1).padStart(3, '0')}.${ext}`;
 
             try {
-                if (media.storage_type === 'object') {
-                    // Jika Object Storage, stream dari internet lalu masuk ke archiver
-                    const fetchResponse = await fetch(media.file_url, { signal: AbortSignal.timeout(60000) });
+                if (media.storage_type === 'object' && media.file_url) {
+                    // Object Storage: stream dari URL dengan timeout 30 detik per file
+                    const fetchResponse = await fetch(media.file_url, {
+                        signal: AbortSignal.timeout(30000)
+                    });
                     if (fetchResponse.ok) {
                         const arrayBuffer = await fetchResponse.arrayBuffer();
                         archive.append(Buffer.from(arrayBuffer), { name: fileName });
+                    } else {
+                        console.warn(`[ZIP] Skip ${media.id}: HTTP ${fetchResponse.status}`);
                     }
                 } else {
-                    // Jika file lokal, langsung baca dari disk
+                    // File lokal: baca dari disk
                     const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
-                    let localPath;
+                    let localPath = null;
+
                     if (media.file_url && media.file_url.startsWith(publicUrl)) {
                         const relativePath = media.file_url.replace(publicUrl, '').replace(/^\//, '');
-                        localPath = path.join(__dirname, '..', relativePath);
+                        localPath = path.join(__dirname, relativePath);
+                    } else if (media.file_url && media.file_url.startsWith('/')) {
+                        localPath = path.join(__dirname, media.file_url);
                     } else if (media.file_name) {
-                        localPath = path.join(__dirname, '..', 'uploads', media.file_name);
-                    } else {
-                        localPath = path.join(__dirname, '..', 'uploads', media.file_url);
+                        localPath = path.join(__dirname, 'uploads', media.file_name);
                     }
 
-                    if (fs.existsSync(localPath)) {
+                    if (localPath && fs.existsSync(localPath)) {
                         archive.file(localPath, { name: fileName });
                     } else {
-                        // Coba path alternatif jika error
+                        // Coba path alternatif
                         const altPath = path.join(__dirname, 'uploads', media.file_name || '');
                         if (fs.existsSync(altPath)) {
                             archive.file(altPath, { name: fileName });
+                        } else {
+                            console.warn(`[ZIP] Skip ${media.id}: file tidak ditemukan di ${localPath}`);
                         }
                     }
                 }
             } catch (err) {
                 console.error(`[API] Gagal zip file ${media.id}:`, err.message);
-                // Lanjut ke file berikutnya, jangan batalkan seluruh ZIP
+                // Lanjut ke file berikutnya — jangan batalkan seluruh ZIP
             }
         }
 
         await archive.finalize();
+        console.log(`[ZIP] ✅ Berhasil buat ZIP ${zipFilename} (${mediaList.length} foto)`);
 
     } catch (err) {
         console.error('[API] Error fast-zip:', err.message);
@@ -342,5 +353,6 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
         }
     }
 });
+
 
 module.exports = { router, authenticateToken };

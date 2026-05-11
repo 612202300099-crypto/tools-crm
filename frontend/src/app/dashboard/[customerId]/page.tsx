@@ -415,44 +415,45 @@ export default function ChatDetail() {
        if (!confirmLanjut) return;
     }
     
-    // [FIX] Menggunakan Server-Side Streaming ZIP
-    // Mengalihkan download dari JSZip (lambat) ke endpoint backend (sangat cepat)
     const token = localStorage.getItem('access_token');
     if (!token) return alert('Sesi berakhir, silakan login ulang');
 
-    // Karena window.open tidak bisa mengirim Authorization header dengan mudah,
-    // kita asumsikan untuk sekarang kita bisa bypass auth untuk GET jika perlu,
-    // ATAU kita bisa lakukan fetch blob lalu download.
-    // Tapi karena archiver me-return file stream, fetch blob masih memakan RAM.
-    // Cara terbaik: kirim token via query parameter (token=...) jika didukung oleh backend.
-    
-    // Mari kita fetch secara stream dan simpan menggunakan object URL
+    const targetCount = selectedMedia.size > 0 ? selectedMedia.size : mediaList.length;
+    const estimasiDetik = Math.ceil(targetCount * 0.5);
+
     setLoadingMedia(true);
     try {
         const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
         const mediaParam = selectedMedia.size > 0 ? `?mediaIds=${Array.from(selectedMedia).join(',')}` : '';
+        
+        // [FIX] Tidak pakai AbortSignal.timeout — ZIP 400 foto bisa makan 2-3 menit
+        // keepalive: true agar koneksi tidak putus saat tab di-background
         const response = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/fast-zip${mediaParam}`, {
             method: 'GET',
             headers: {
                 'Authorization': `Bearer ${token}`
-            }
+            },
+            keepalive: true,
         });
 
         if (!response.ok) {
             const err = await response.json().catch(() => ({}));
-            throw new Error(err.error || `HTTP ${response.status}`);
+            throw new Error(err.error || `Server error HTTP ${response.status}`);
         }
 
         const blob = await response.blob();
+        if (blob.size < 100) throw new Error('ZIP kosong — kemungkinan tidak ada foto yang berhasil dipack');
+        
         saveAs(blob, `${orderName}.zip`);
 
     } catch (error: any) {
-        console.error(error);
-        alert(`Gagal membuat ZIP Server-Side: ${error.message}`);
+        console.error('[ZIP]', error);
+        alert(`Gagal membuat ZIP: ${error.message}\n\nTips: Coba Download Zip lagi — jika masih gagal, kurangi jumlah foto yang dipilih.`);
     } finally {
         setLoadingMedia(false);
     }
   };
+
 
 
   const sendQuickReply = async (templateText?: string) => {
