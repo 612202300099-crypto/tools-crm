@@ -716,7 +716,11 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                 if (diskOk) {
                     console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang (Prioritas: ${isPriority})...`);
                     mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, isPriority);
-                    setImmediate(() => checkAndRespondMedia(client, customer, supabase));
+                    
+                    // [ANTI-SPAM FIX] Jangan trigger AI Bot jika ini adalah pesan lama hasil Gali Ulang/Resync
+                    if (!skipCustomerUpdate) {
+                        setImmediate(() => checkAndRespondMedia(client, customer, supabase));
+                    }
                 }
             } else {
                 console.log(`[DEBUG] ⏭️ Media dari Bot/Admin dideteksi. Abaikan antrian.`);
@@ -725,7 +729,10 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         // ─── AI FOLLOW-UP: Alur teks — tagih no pesanan, konfirmasi foto, dst ──
         // Hanya berjalan untuk pesan TEKS dari customer (bukan media, bukan fromMe)
         if (!message.hasMedia && !isFromMe && customer) {
-            await checkAndRespond(client, customer, message, supabase);
+            // [ANTI-SPAM FIX] Jangan trigger AI Bot jika ini adalah pesan lama hasil Gali Ulang/Resync
+            if (!skipCustomerUpdate) {
+                await checkAndRespond(client, customer, message, supabase);
+            }
         }
         // ───────────────────────────────────────────────────────────────────────
 
