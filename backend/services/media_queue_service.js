@@ -79,18 +79,20 @@ class MediaQueueService {
                 let queue = JSON.parse(fs.readFileSync(this.queueFile, 'utf8'));
                 const before = queue.length;
 
-                // [v5] PRUNE: Hapus item lebih tua dari 2 jam
-                // WhatsApp tidak menyimpan media di cache Chrome lebih dari ~2 jam.
-                // Item lama PASTI gagal → buang agar tidak buang waktu worker.
-                const cutoff = Date.now() - (2 * 60 * 60 * 1000);
+                // [v6 FIX] PRUNE: Hapus item lebih tua dari 7 HARI (bukan 2 jam!)
+                // Foto dari hari Kamis-Minggu (3-4 hari lalu) perlu tetap ada di antrean.
+                // msgCache (objek pesan) memang hilang saat restart, tapi deep-search akan
+                // mencoba mengambilnya kembali via getChatById + fetchMessages.
+                const cutoff = Date.now() - (7 * 24 * 60 * 60 * 1000); // 7 hari
                 queue = queue.filter(job => {
                     const addedTime = job.addedAt ? new Date(job.addedAt).getTime() : 0;
                     return addedTime > cutoff;
                 });
 
-                // [v5] CAP: Batasi ukuran antrian
-                if (queue.length > 300) {
-                    queue = queue.slice(-300); // Ambil 300 terbaru
+                // [v6 FIX] CAP: Gunakan maxQueueSize (bukan angka hardcode 300!)
+                const maxCap = parseInt(process.env.MEDIA_MAX_QUEUE) || 3000;
+                if (queue.length > maxCap) {
+                    queue = queue.slice(-maxCap); // Ambil N terbaru
                 }
 
                 const pruned = before - queue.length;
@@ -280,9 +282,12 @@ class MediaQueueService {
                                 30000,
                                 'getChatById_deepSearch'
                             );
+                            // [v6 FIX] Deep search harus cukup dalam (500) agar foto lama ketemu!
+                            // limit 20 sebelumnya hanya melihat 20 pesan terbaru — foto dari
+                            // hari Kamis (ratusan pesan lalu) tidak akan pernah ketemu!
                             await this.withTimeout(
-                                chat.fetchMessages({ limit: 20 }),
-                                30000,
+                                chat.fetchMessages({ limit: 500 }),
+                                60000,
                                 'fetchMessages_deepSearch'
                             );
                             msg = await this.withTimeout(

@@ -1301,13 +1301,18 @@ app.post('/api/wa/resync', async (req, res) => {
         return res.status(400).json({ error: 'phone_number diperlukan.' });
     }
 
-    // [FIX] Tidak lagi menolak saat !isConnected
-    // Gali Ulang hanya antri re-processing — bisa diterima kapan saja.
-    // Background job yang akan tunggu koneksi siap (retry 3x).
-    res.json({ success: true, message: 'Gali ulang dimulai di latar belakang. Pesan & foto akan muncul otomatis.' });
+    // Kirim respon awal (non-blocking) — frontend tidak perlu tunggu lama
+    res.json({ success: true, message: 'Gali ulang dimulai. Foto akan muncul secara bertahap.' });
 
     // Proses di background (non-blocking)
     setImmediate(async () => {
+        // Helper emit progress ke semua frontend yang terbuka (real-time update)
+        const emitProgress = (event, data) => {
+            try { if (global._io) global._io.emit(event, data); } catch (e) {}
+        };
+
+        emitProgress('resync_started', { phone_number, customer_id });
+
         try {
             // Tunggu WA siap — retry 3x tiap 10 detik
             let ready = isConnected;
@@ -1322,6 +1327,7 @@ app.post('/api/wa/resync', async (req, res) => {
 
             if (!ready) {
                 console.error(`[RESYNC] ❌ ${phone_number}: WA masih tidak konek setelah 30 detik. Batal.`);
+                emitProgress('resync_done', { phone_number, customer_id, totalMessages: 0, totalMedia: 0, error: 'WA tidak konek' });
                 return;
             }
 
@@ -1350,11 +1356,14 @@ app.post('/api/wa/resync', async (req, res) => {
             }
 
             console.log(`[RESYNC] 🎯 Ditemukan ${chatIdsToSync.size} titik riwayat (LID/C.US) untuk ${phone_number}. Akan menggali semuanya...`);
+            emitProgress('resync_progress', { phone_number, message: `Ditemukan ${chatIdsToSync.size} titik riwayat chat. Menggali semua...` });
 
             let totalPesanDiproses = 0;
+            let totalMediaDitemukan = 0;
 
             for (const targetChatId of chatIdsToSync) {
-                console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number} (Target: ${targetChatId})`);
+                console.log(`[RESYNC] 🔍 Menggali: ${phone_number} (Target: ${targetChatId})`);
+                emitProgress('resync_progress', { phone_number, message: `Mengambil riwayat dari ${targetChatId}...` });
                 
                 try {
                     // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
@@ -1363,10 +1372,13 @@ app.post('/api/wa/resync', async (req, res) => {
                     }, { priority: 2, timeout: 40000 });
 
                     const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                        // [UPGRADE] Gunakan limit 3000 untuk memastikan pesan dari berhari-hari lalu (seperti foto ratusan) tetap terjangkau.
-                        // Tingkatkan juga timeout menjadi 5 menit (300000ms) karena penarikan data lama butuh waktu lebih.
+                        // Limit 3000 = jangkau pesan dari beberapa hari yang lalu
                         return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'fetchMessages_resync');
                     }, { priority: 2, timeout: 350000 });
+
+                    const mediaInBatch = historyMessages.filter(m => m.hasMedia && !m.fromMe).length;
+                    console.log(`[RESYNC] 📊 ${historyMessages.length} pesan ditemukan (${mediaInBatch} foto/video dari customer) di ${targetChatId}`);
+                    emitProgress('resync_progress', { phone_number, message: `${historyMessages.length} pesan ditemukan (${mediaInBatch} foto/video dari customer). Memproses...` });
 
                     // [SUPER OPTIMASI] Build cached context SEBELUM loop. 
                     // Daripada memanggil chat.getContact() ratusan kali dan bikin Chrome hang!
@@ -1403,18 +1415,63 @@ app.post('/api/wa/resync', async (req, res) => {
                         // Pass cachedContext agar tidak memanggil Chrome API per pesan!
                         await processMessageCommand(msg, true, false, cachedContext);
                         count++;
+                        if (msg.hasMedia && !msg.fromMe) totalMediaDitemukan++;
                         totalPesanDiproses++;
                     }
 
-                    console.log(`[RESYNC] ✅ Selesai! ${count} pesan diproses dari titik ${targetChatId}.`);
+                    console.log(`[RESYNC] ✅ ${count} pesan diproses dari titik ${targetChatId}.`);
                 } catch (err) {
                     console.error(`[RESYNC ERROR] Gagal menyisir titik ${targetChatId}:`, err.message);
+                    emitProgress('resync_progress', { phone_number, message: `⚠️ Gagal baca ${targetChatId}: ${err.message}` });
                 }
             }
 
-            console.log(`[RESYNC] 🏆 TOTAL GALI ULANG SELESAI: ${totalPesanDiproses} pesan diproses untuk ${phone_number}.`);
+            // [HEALING PASS] Cari media di DB yang sudah tercatat tapi belum ter-upload ke storage
+            // Ini menyelamatkan foto yang masuk DB tapi downloadnya gagal di masa lalu
+            try {
+                const { data: missingMedia } = await supabase
+                    .from('media')
+                    .select('id, message_id, storage_key')
+                    .eq('customer_id', customer_id)
+                    .or('storage_key.is.null,storage_key.eq.');
+
+                if (missingMedia && missingMedia.length > 0) {
+                    console.log(`[RESYNC] 🩹 HEALING: ${missingMedia.length} media di DB belum ter-upload. Memasukkan ulang ke antrean...`);
+                    emitProgress('resync_progress', { phone_number, message: `🩹 Ditemukan ${missingMedia.length} foto yang pernah gagal diunduh. Mencoba lagi...` });
+                    
+                    const { data: custData } = await supabase.from('customers').select('*').eq('id', customer_id).single();
+                    if (custData) {
+                        for (const m of missingMedia) {
+                            try {
+                                const { data: msgRecord } = await supabase.from('messages').select('wa_id, created_at').eq('id', m.message_id).single();
+                                if (msgRecord && msgRecord.wa_id) {
+                                    mediaQueue.addToQueue(
+                                        msgRecord.wa_id,
+                                        custData,
+                                        msgRecord.created_at || new Date().toISOString(),
+                                        true // PRIORITY: langsung ke depan antrean!
+                                    );
+                                }
+                            } catch (healItemErr) { /* skip item gagal, lanjut yang lain */ }
+                        }
+                    }
+                }
+            } catch (healingErr) {
+                console.warn(`[RESYNC] ⚠️ Healing pass gagal:`, healingErr.message);
+            }
+
+            const summary = `Gali Ulang selesai! ${totalPesanDiproses} pesan diproses, ${totalMediaDitemukan} foto/video ditemukan dan dimasukkan ke antrean download.`;
+            console.log(`[RESYNC] 🏆 ${summary}`);
+            emitProgress('resync_done', { 
+                phone_number, 
+                customer_id,
+                totalMessages: totalPesanDiproses, 
+                totalMedia: totalMediaDitemukan,
+                message: summary
+            });
         } catch (err) {
             console.error(`[RESYNC ERROR] ${phone_number}:`, err.message);
+            emitProgress('resync_done', { phone_number, customer_id, totalMessages: 0, totalMedia: 0, error: err.message });
         }
     });
 });
@@ -1758,9 +1815,13 @@ const PORT = process.env.PORT || 3001;
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: '*' } });
 setIo(io);
+global._io = io; // [UPGRADE] Expose globally agar resync/emergency bisa emit progress ke frontend
 
 io.on('connection', (socket) => {
     console.log('[SOCKET] Frontend Client connected');
+    socket.on('disconnect', () => {
+        // silent disconnect — normal saat browser refresh
+    });
 });
 
 server.listen(PORT, '0.0.0.0', () => {

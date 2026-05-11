@@ -54,9 +54,11 @@ export default function ChatDetail() {
   const [scanResult, setScanResult] = useState<{type: 'success'|'error'|'not_found', message: string} | null>(null);
   const [isSyncingDrive, setIsSyncingDrive] = useState(false);
   
+  // [UPGRADE] State untuk progres Gali Ulang real-time via Socket.IO
+  const [resyncProgress, setResyncProgress] = useState<{message: string; done: boolean; totalMessages?: number; totalMedia?: number; error?: string} | null>(null);
+  
   // State untuk status sinkronisasi Drive dari backend
   const [driveStatus, setDriveStatus] = useState<Record<string, string>>({});
-
   useEffect(() => {
     fetchData();
 
@@ -98,8 +100,46 @@ export default function ChatDetail() {
 
     socket.on('db_change', handleDbChange);
 
+    // [UPGRADE] Dengarkan event progres Gali Ulang dari backend
+    const handleResyncStarted = (data: any) => {
+      if (data?.customer_id === customerId || data?.phone_number === customer?.phone_number) {
+        setResyncProgress({ message: '🔍 Memulai Gali Ulang... Menyisir riwayat chat WA.', done: false });
+      }
+    };
+    const handleResyncProgress = (data: any) => {
+      if (data?.phone_number === customer?.phone_number || data?.customer_id === customerId) {
+        setResyncProgress({ message: data.message || 'Sedang memproses...', done: false });
+      }
+    };
+    const handleResyncDone = (data: any) => {
+      if (data?.phone_number === customer?.phone_number || data?.customer_id === customerId) {
+        setIsResyncing(false);
+        if (data.error) {
+          setResyncProgress({ message: `❌ Gagal: ${data.error}`, done: true, error: data.error });
+        } else {
+          setResyncProgress({
+            message: `✅ Selesai! Ditemukan ${data.totalMessages || 0} pesan & ${data.totalMedia || 0} foto/video. Foto sedang diunduh di latar belakang.`,
+            done: true,
+            totalMessages: data.totalMessages,
+            totalMedia: data.totalMedia
+          });
+          // Auto-refresh data setelah 3 detik
+          setTimeout(() => fetchData(), 3000);
+          // Auto-hilangkan banner setelah 15 detik
+          setTimeout(() => setResyncProgress(null), 15000);
+        }
+      }
+    };
+
+    socket.on('resync_started', handleResyncStarted);
+    socket.on('resync_progress', handleResyncProgress);
+    socket.on('resync_done', handleResyncDone);
+
     return () => {
         socket.off('db_change', handleDbChange);
+        socket.off('resync_started', handleResyncStarted);
+        socket.off('resync_progress', handleResyncProgress);
+        socket.off('resync_done', handleResyncDone);
     };
   }, [customerId]);
 
@@ -187,12 +227,13 @@ export default function ChatDetail() {
   };
 
   const handleResync = async () => {
-    const confirmAsk = window.confirm("Perintah ini akan secara AMAN mengunggah (UPSERT) ulang riwayat pesan WA ke Web tanpa satupun menghapus data Anda saat ini. Cocok untuk menambal pesan/foto yang tersendat. Lanjutkan?");
+    const confirmAsk = window.confirm("Perintah ini akan menggali ulang SELURUH riwayat foto & pesan dari WhatsApp (termasuk foto lama dari @LID dan @C.US). Progres akan muncul di layar secara real-time. Lanjutkan?");
     if (!confirmAsk) return;
     
     setIsResyncing(true);
+    setResyncProgress({ message: '⏳ Mengirim perintah ke server...', done: false });
+    
     try {
-        // Timeout 15 detik agar tidak hang jika server tidak respons
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 15000);
 
@@ -210,28 +251,23 @@ export default function ChatDetail() {
             clearTimeout(timeoutId);
         } catch (networkErr: any) {
             clearTimeout(timeoutId);
-            // Network error (server mati, CORS, timeout) — tampilkan pesan ramah
-            const isTimeout = networkErr.name === 'AbortError';
-            alert(isTimeout 
-                ? "⚠️ Server tidak merespons dalam 15 detik. Kemungkinan sedang memulai ulang. Tunggu 1-2 menit lalu coba lagi."
-                : "⚠️ Tidak bisa terhubung ke server. Pastikan VPS menyala dan coba lagi."
-            );
+            setIsResyncing(false);
+            setResyncProgress({ message: networkErr.name === 'AbortError' ? '⚠️ Server tidak merespons dalam 15 detik.' : '⚠️ Tidak bisa terhubung ke server.', done: true, error: 'network' });
             return;
         }
 
         if (!res.ok) {
            const errData = await res.json().catch(() => ({}));
-           // Tampilkan error dari server tapi jangan panic
-           alert(`⚠️ ${errData.error || 'Gali Ulang gagal. Coba lagi dalam beberapa menit.'}`);
+           setIsResyncing(false);
+           setResyncProgress({ message: `❌ ${errData.error || 'Gali Ulang gagal.'}`, done: true, error: errData.error });
            return;
         }
         
-        alert("✅ Gali Ulang dimulai! Foto & pesan akan muncul otomatis dalam beberapa menit.");
-        fetchData();
+        // Respon sukses → tunggu event Socket.IO untuk update progres
+        setResyncProgress({ message: '🚀 Perintah diterima server! Menggali riwayat... (bisa memakan 1-5 menit untuk chat lama)', done: false });
     } catch (err: any) {
-        alert("Gagal melakukan Gali Ulang. Detail: " + err.message);
-    } finally {
         setIsResyncing(false);
+        setResyncProgress({ message: `❌ Error: ${err.message}`, done: true, error: err.message });
     }
   };
 
@@ -713,11 +749,36 @@ export default function ChatDetail() {
                  <button 
                     onClick={handleResync}
                     disabled={isResyncing || isDeleting}
-                    className="w-full flex items-center justify-center space-x-2 py-3 rounded-xl text-sm font-bold bg-amber-100/50 text-amber-700 hover:bg-amber-100 focus:ring-4 focus:ring-amber-500/30 transition shadow-sm border border-amber-300"
+                    className="w-full flex items-center justify-center space-x-2 py-3 rounded-xl text-sm font-bold bg-amber-100/50 text-amber-700 hover:bg-amber-100 focus:ring-4 focus:ring-amber-500/30 transition shadow-sm border border-amber-300 disabled:opacity-60"
                  >
-                   <svg className={clsx("w-5 h-5", isResyncing && "animate-spin")} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
-                   <span>{isResyncing ? 'Menggali Ulang Database...' : 'Gali Ulang Riwayat WA'}</span>
+                   <svg className={clsx("w-5 h-5 shrink-0", isResyncing && "animate-spin")} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg>
+                   <span>{isResyncing ? 'Menggali Ulang... Mohon Tunggu' : 'Gali Ulang Riwayat WA'}</span>
                  </button>
+
+                 {/* [UPGRADE] Banner Progress Real-Time Gali Ulang */}
+                 {resyncProgress && (
+                   <div className={clsx(
+                     "p-3 rounded-xl text-xs font-medium border leading-relaxed transition-all duration-300",
+                     resyncProgress.error
+                       ? "bg-red-50 text-red-700 border-red-200"
+                       : resyncProgress.done
+                         ? "bg-green-50 text-green-800 border-green-200"
+                         : "bg-blue-50 text-blue-800 border-blue-200"
+                   )}>
+                     <div className="flex items-start space-x-2">
+                       {!resyncProgress.done && !resyncProgress.error && (
+                         <span className="mt-0.5 w-3 h-3 shrink-0 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                       )}
+                       <span>{resyncProgress.message}</span>
+                     </div>
+                     {resyncProgress.done && !resyncProgress.error && resyncProgress.totalMedia !== undefined && (
+                       <div className="mt-2 flex gap-3">
+                         <span className="px-2 py-0.5 bg-green-100 text-green-700 rounded-full font-bold">📨 {resyncProgress.totalMessages} pesan</span>
+                         <span className="px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full font-bold">🖼️ {resyncProgress.totalMedia} foto</span>
+                       </div>
+                     )}
+                   </div>
+                 )}
                  
                  <button 
                     onClick={handleDeleteChat}
