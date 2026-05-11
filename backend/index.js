@@ -1392,6 +1392,7 @@ app.post('/api/wa/resync', async (req, res) => {
 
             let totalPesanDiproses = 0;
             let totalMediaDitemukan = 0;
+            const processedMsgIds = new Set(); // Global deduplication across all targets
 
             for (const targetChatId of chatIdsToSync) {
                 console.log(`[RESYNC] 🔍 Menggali: ${phone_number} (Target: ${targetChatId})`);
@@ -1403,25 +1404,62 @@ app.post('/api/wa/resync', async (req, res) => {
                     }, { priority: 2, timeout: 40000 });
 
                     // ═══════════════════════════════════════════════════════════════
-                    // [GALI ULANG v5] SIMPLE HIGH-LIMIT FETCH
+                    // [GALI ULANG v6] ROBUST PAGINATION (SCROLL UP SIMULATION)
                     // ═══════════════════════════════════════════════════════════════
-                    // whatsapp-web.js fetchMessages({ limit: N }) secara internal
-                    // memuat pesan dari server WA (bukan hanya RAM) ketika limit > jumlah
-                    // pesan yg ada di cache. Cukup satu panggilan dengan limit besar.
-                    // Loop loadEarlierMessages dihapus karena tidak kompatibel dengan
-                    // semua versi & menyebabkan bubble kosong (tipe: unknown).
+                    // Mengambil pesan dalam potongan (chunks) dan mundur ke belakang
+                    // menggunakan parameter 'before' untuk memaksa WA memuat pesan lama.
                     // ═══════════════════════════════════════════════════════════════
-                    emitProgress('resync_progress', { phone_number, message: `Memuat riwayat dari ${targetChatId}... Mohon tunggu.` });
+                    emitProgress('resync_progress', { phone_number, message: `Memuat riwayat mendalam dari ${targetChatId}... Mohon tunggu.` });
 
-                    const allMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                        return withTimeout(chat.fetchMessages({ limit: 5000 }), 180000, 'fetchMessages_deep');
-                    }, { priority: 2, timeout: 210000 });
+                    let allMessagesForTarget = [];
+                    let oldestMsgId = null;
+                    let hasMore = true;
+                    let attempts = 0;
+                    const MAX_ATTEMPTS = 15; // 15 * 100 = ~1500 pesan per target
 
-                    console.log(`[RESYNC] 📜 ${allMessages.length} pesan dimuat dari ${targetChatId}`);
+                    while (hasMore && attempts < MAX_ATTEMPTS) {
+                        attempts++;
+                        const options = { limit: 100 };
+                        if (oldestMsgId) {
+                            options.before = oldestMsgId;
+                        }
 
-                    const mediaInBatch = allMessages.filter(m => m.hasMedia && !m.fromMe).length;
-                    console.log(`[RESYNC] 📊 FINAL: ${allMessages.length} pesan (${mediaInBatch} foto/video dari customer) di ${targetChatId}`);
-                    emitProgress('resync_progress', { phone_number, message: `✅ Paginasi selesai! ${allMessages.length} pesan ditemukan (${mediaInBatch} foto dari customer). Memproses ke antrean...` });
+                        const chunk = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
+                            return withTimeout(chat.fetchMessages(options), 45000, `fetchMessages_chunk_${attempts}`);
+                        }, { priority: 2, timeout: 60000 });
+
+                        if (!chunk || chunk.length === 0) {
+                            hasMore = false;
+                            break;
+                        }
+
+                        console.log(`[RESYNC] 📜 Chunk ${attempts}: ${chunk.length} pesan dimuat dari ${targetChatId}`);
+
+                        // Tambahkan ke penampung
+                        allMessagesForTarget = [...chunk, ...allMessagesForTarget];
+
+                        // Update oldestMsgId untuk iterasi berikutnya (chunk[0] adalah yang tertua)
+                        const currentOldestId = chunk[0].id._serialized;
+                        
+                        // Cek apakah kita stuck (library mengembalikan data yang sama)
+                        if (oldestMsgId === currentOldestId) {
+                            console.log(`[RESYNC] 🛑 Pagination stuck di ID yang sama. Berhenti.`);
+                            break;
+                        }
+                        
+                        oldestMsgId = currentOldestId;
+
+                        // Jika chunk kurang dari limit, berarti sudah habis di server
+                        if (chunk.length < 100) {
+                            hasMore = false;
+                            break;
+                        }
+
+                        // Beri jeda sedikit agar tidak dianggap spam oleh server WA
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+
+                    console.log(`[RESYNC] 📊 Total awal dari ${targetChatId}: ${allMessagesForTarget.length} pesan`);
 
                     // Build cached context SEKALI saja sebelum loop pemrosesan
                     let cachedContext = null;
@@ -1452,10 +1490,12 @@ app.post('/api/wa/resync', async (req, res) => {
                     }
 
                     let count = 0;
-                    for (const msg of allMessages) {
-                        // [FIX BUBBLE KOSONG] Skip pesan type:unknown tanpa body & media
-                        // Ini adalah pesan sistem internal WA (call logs, dll) yang jika
-                        // diinsert ke DB akan muncul sebagai bubble kosong di UI chat
+                    for (const msg of allMessagesForTarget) {
+                        // 1. DEDUPLIKASI GLOBAL: Jika sudah diproses di target sebelumnya, skip!
+                        if (processedMsgIds.has(msg.id._serialized)) continue;
+                        processedMsgIds.add(msg.id._serialized);
+
+                        // 2. Filter pesan sistem kosong
                         if (msg.type === 'unknown' && !msg.hasMedia && !msg.body) continue;
                         if (msg.type === 'e2e_notification') continue;
                         if (msg.type === 'notification_template') continue;
@@ -1466,7 +1506,7 @@ app.post('/api/wa/resync', async (req, res) => {
                         totalPesanDiproses++;
                     }
 
-                    console.log(`[RESYNC] ✅ ${count} pesan diproses dari titik ${targetChatId}.`);
+                    console.log(`[RESYNC] ✅ ${count} pesan baru diproses dari titik ${targetChatId}.`);
                 } catch (err) {
                     console.error(`[RESYNC ERROR] Gagal menyisir titik ${targetChatId}:`, err.message);
                     emitProgress('resync_progress', { phone_number, message: `⚠️ Gagal baca ${targetChatId}: ${err.message}` });
