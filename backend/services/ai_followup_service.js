@@ -273,9 +273,14 @@ async function handleOrderFound(waClient, customer, orderResult, supabase) {
         status: 'BELUM_KIRIM_FOTO',
     }).eq('id', customer.id);
 
-    // Kirim pesan detail pesanan + permintaan foto
-    const detailMsg = formatOrderDetailMessage(orderResult);
-    await sendWAMessage(waClient, customer.phone_number, detailMsg);
+    // Kirim pesan detail pesanan + permintaan foto JIKA bot aktif
+    const config = await getCachedAiConfig(supabase);
+    if (config && config.is_enabled) {
+        const detailMsg = formatOrderDetailMessage(orderResult);
+        await sendWAMessage(waClient, customer.phone_number, detailMsg);
+    } else {
+        console.log(`[AI-BOT] 🤫 Stealth Mode: Ditemukan order ${customer.order_id}, pesan WA ditahan.`);
+    }
 
     const orderId = customer.order_id || '(dari spreadsheet)';
     console.log(`[AI-BOT] ✅ Detail pesanan ${orderId} dikirim ke ${customer.phone_number} (${storeName}, resi: ${resi || '-'}, foto: ${totalPhotosNeeded}, SKU: ${skuLabel})`);
@@ -297,13 +302,16 @@ async function handleOrderNotFound(waClient, customer, orderId, supabase) {
     // Masukkan ke antrian pending untuk di-retry otomatis
     pendingOrderService.addPendingOrder(customer.id, orderId, customer.phone_number);
 
-    // Kirim pesan ramah — tidak menyalahkan customer
-    const msg =
-        `✅ Nomor pesanan *${orderId}* sudah kami catat kak!\n\n` +
-        `Saat ini pesanan Anda sedang dalam proses sinkronisasi sistem 🔄\n\n` +
-        `Kami akan otomatis mengirimkan konfirmasi dan detail pesanan dalam beberapa menit ya kak 🙏\n\n` +
-        `_Tidak perlu kirim ulang nomor pesanannya ya kak_ 😊`;
-    await sendWAMessage(waClient, customer.phone_number, msg);
+    // Kirim pesan ramah JIKA bot aktif
+    const config = await getCachedAiConfig(supabase);
+    if (config && config.is_enabled) {
+        const msg =
+            `✅ Nomor pesanan *${orderId}* sudah kami catat kak!\n\n` +
+            `Saat ini pesanan Anda sedang dalam proses sinkronisasi sistem 🔄\n\n` +
+            `Kami akan otomatis mengirimkan konfirmasi dan detail pesanan dalam beberapa menit ya kak 🙏\n\n` +
+            `_Tidak perlu kirim ulang nomor pesanannya ya kak_ 😊`;
+        await sendWAMessage(waClient, customer.phone_number, msg);
+    }
 
     console.log(`[AI-BOT] 📥 Order ${orderId} masuk Pending Queue — retry otomatis 5 menit.`);
 }
@@ -313,9 +321,12 @@ async function handleOrderCancelled(waClient, customer, orderResult, supabase) {
     // Reset order_id
     await supabase.from('customers').update({ order_id: null }).eq('id', customer.id);
 
-    const msg = `❌ Maaf kak, pesanan *${customer.order_id}* tercatat sudah *${orderResult.status}*.\n\n` +
-        `Jika ada pertanyaan lebih lanjut, silakan hubungi toko kami secara langsung ya kak 🙏`;
-    await sendWAMessage(waClient, customer.phone_number, msg);
+    const config = await getCachedAiConfig(supabase);
+    if (config && config.is_enabled) {
+        const msg = `❌ Maaf kak, pesanan *${customer.order_id}* tercatat sudah *${orderResult.status}*.\n\n` +
+            `Jika ada pertanyaan lebih lanjut, silakan hubungi toko kami secara langsung ya kak 🙏`;
+        await sendWAMessage(waClient, customer.phone_number, msg);
+    }
 }
 
 // ─── Handler: Cek Jumlah Foto yang Sudah Masuk ───────────────────────────────
@@ -365,9 +376,12 @@ async function handleMediaPhotoCheck(waClient, customer, supabase) {
                     status: 'SUDAH_KIRIM_FOTO',
                 }).eq('id', freshCustomer.id);
 
-                const msg = `✅ *${currentPhotoCount} foto* Anda sudah kami terima dengan lengkap!\n\n` +
-                    `Pesanan Anda akan segera kami proses. Terima kasih sudah mempercayakan kepada kami! 😊🎉`;
-                await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                const config = await getCachedAiConfig(supabase);
+                if (config && config.is_enabled) {
+                    const msg = `✅ *${currentPhotoCount} foto* Anda sudah kami terima dengan lengkap!\n\n` +
+                        `Pesanan Anda akan segera kami proses. Terima kasih sudah mempercayakan kepada kami! 😊🎉`;
+                    await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                }
 
             } else if (followupCount < 3) {
                 // Foto masih kurang, tagih lagi (maks 3x)
@@ -376,9 +390,12 @@ async function handleMediaPhotoCheck(waClient, customer, supabase) {
                     photo_followup_count: followupCount + 1,
                 }).eq('id', freshCustomer.id);
 
-                const msg = `📸 Foto Anda sudah masuk *${currentPhotoCount} dari ${requiredPhotos}* lembar.\n\n` +
-                    `Masih kurang *${remaining} foto* lagi ya kak. Silakan kirimkan sisa fotonya 🙏`;
-                await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                const config = await getCachedAiConfig(supabase);
+                if (config && config.is_enabled) {
+                    const msg = `📸 Foto Anda sudah masuk *${currentPhotoCount} dari ${requiredPhotos}* lembar.\n\n` +
+                        `Masih kurang *${remaining} foto* lagi ya kak. Silakan kirimkan sisa fotonya 🙏`;
+                    await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                }
 
             } else {
                 // Sudah 3x ditagih, tanya konfirmasi
@@ -386,12 +403,15 @@ async function handleMediaPhotoCheck(waClient, customer, supabase) {
                     photo_followup_count: followupCount + 1,
                 }).eq('id', freshCustomer.id);
 
-                const msg = `📸 Saat ini kami sudah menerima *${currentPhotoCount} foto* dari total *${requiredPhotos}* yang dibutuhkan.\n\n` +
-                    `Apakah foto yang Anda kirimkan sudah *cukup*? 🤔\n\n` +
-                    `Balas:\n` +
-                    `• *"proses"* atau *"cukup"* → Jika foto sudah selesai dikirim\n` +
-                    `• *"belum"* atau *"kurang"* → Jika masih ada foto yang akan dikirim`;
-                await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                const config = await getCachedAiConfig(supabase);
+                if (config && config.is_enabled) {
+                    const msg = `📸 Saat ini kami sudah menerima *${currentPhotoCount} foto* dari total *${requiredPhotos}* yang dibutuhkan.\n\n` +
+                        `Apakah foto yang Anda kirimkan sudah *cukup*? 🤔\n\n` +
+                        `Balas:\n` +
+                        `• *"proses"* atau *"cukup"* → Jika foto sudah selesai dikirim\n` +
+                        `• *"belum"* atau *"kurang"* → Jika masih ada foto yang akan dikirim`;
+                    await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                }
             }
 
         } else {
@@ -402,12 +422,15 @@ async function handleMediaPhotoCheck(waClient, customer, supabase) {
                     photo_followup_count: 1,
                 }).eq('id', freshCustomer.id);
 
-                const msg = `✅ Foto Anda sudah kami terima!\n\n` +
-                    `Apakah foto yang Anda kirimkan sudah *lengkap*? 🤔\n\n` +
-                    `Balas:\n` +
-                    `• *"proses"* atau *"cukup"* → Jika foto sudah selesai\n` +
-                    `• *"belum"* atau *"kurang"* → Jika masih ada foto lain`;
-                await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                const config = await getCachedAiConfig(supabase);
+                if (config && config.is_enabled) {
+                    const msg = `✅ Foto Anda sudah kami terima!\n\n` +
+                        `Apakah foto yang Anda kirimkan sudah *lengkap*? 🤔\n\n` +
+                        `Balas:\n` +
+                        `• *"proses"* atau *"cukup"* → Jika foto sudah selesai\n` +
+                        `• *"belum"* atau *"kurang"* → Jika masih ada foto lain`;
+                    await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+                }
             }
             // followupCount > 0 = sudah pernah ditanya, tunggu jawaban customer (jangan spam)
         }
@@ -511,14 +534,22 @@ async function checkAndRespond(waClient, customer, message, supabase) {
                 status: 'SUDAH_KIRIM_FOTO',
             }).eq('id', freshCustomer.id);
 
-            const msg = `✅ Baik kak, foto Anda sudah kami tandai *lengkap* dan akan segera diproses!\n\nTerima kasih sudah berbelanja bersama kami! 🎉😊`;
-            await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+            const config = await getCachedAiConfig(supabase);
+            if (config && config.is_enabled) {
+                const msg = `✅ Baik kak, foto Anda sudah kami tandai *lengkap* dan akan segera diproses!\n\nTerima kasih sudah berbelanja bersama kami! 🎉😊`;
+                await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+            } else {
+                console.log(`[AI-BOT] 🤫 Stealth Mode: Konfirmasi "proses" diterima dari ${freshCustomer.phone_number}, pesan balasan ditahan.`);
+            }
             return;
         }
 
         if (isPhotoConfirmNo(msgText)) {
-            const msg = `👍 Oke kak, silakan kirimkan sisa fotonya ya. Kami tunggu! 🙏`;
-            await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+            const config = await getCachedAiConfig(supabase);
+            if (config && config.is_enabled) {
+                const msg = `👍 Oke kak, silakan kirimkan sisa fotonya ya. Kami tunggu! 🙏`;
+                await sendWAMessage(waClient, freshCustomer.phone_number, msg);
+            }
             return;
         }
 

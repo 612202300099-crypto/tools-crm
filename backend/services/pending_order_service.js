@@ -176,16 +176,22 @@ async function processPendingOrders() {
                 if (nextRetry >= pending.max_retries) {
                     // ⚠️ MAX RETRY TERCAPAI — Eskalasi ke customer
                     console.warn(`[PENDING-ORDER] ⚠️ Order ${pending.order_id} tidak ditemukan setelah ${nextRetry} retry. Eskalasi!`);
-                    await sendWAMessageDirect(
-                        _waClient,
-                        pending.phone_number,
-                        `⚠️ Halo kak! Kami sudah mencoba memproses nomor pesanan *${pending.order_id}* namun belum berhasil ditemukan di sistem kami.\n\n` +
-                        `Kemungkinan penyebabnya:\n` +
-                        `• Pesanan melalui platform lain (bukan TikTok, Tokopedia, atau Shopee yang terdaftar)\n` +
-                        `• Nomor pesanan mungkin salah ketik\n\n` +
-                        `Mohon hubungi tim kami langsung untuk bantuan lebih lanjut ya kak 🙏\n` +
-                        `Tim kami akan membantu secepatnya! 😊`
-                    );
+                    
+                    const { data: config } = await _supabase.from('ai_config').select('is_enabled').eq('id', 1).single();
+                    if (config && config.is_enabled) {
+                        await sendWAMessageDirect(
+                            _waClient,
+                            pending.phone_number,
+                            `⚠️ Halo kak! Kami sudah mencoba memproses nomor pesanan *${pending.order_id}* namun belum berhasil ditemukan di sistem kami.\n\n` +
+                            `Kemungkinan penyebabnya:\n` +
+                            `• Pesanan melalui platform lain (bukan TikTok, Tokopedia, atau Shopee yang terdaftar)\n` +
+                            `• Nomor pesanan mungkin salah ketik\n\n` +
+                            `Mohon hubungi tim kami langsung untuk bantuan lebih lanjut ya kak 🙏\n` +
+                            `Tim kami akan membantu secepatnya! 😊`
+                        );
+                    } else {
+                        console.log(`[PENDING-ORDER] 🤫 Stealth Mode: Order ${pending.order_id} gagal eskalasi, pesan WA ditahan.`);
+                    }
                     resolvePendingOrder(pending.order_id); // Tutup tiket agar tidak loop terus
                 }
             }

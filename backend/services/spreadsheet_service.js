@@ -318,4 +318,54 @@ function formatOrderDetailMessage(orderResult) {
     return message;
 }
 
-module.exports = { lookupOrder, formatOrderDetailMessage, isPolaroidProduct, getProductAbbreviation };
+// ─── FUNGSI BARU: Batch Sync Resi (Anti Rate-Limit) ──────────────────────────
+/**
+ * Mencari banyak orderId sekaligus hanya dengan 3 request (1x per toko).
+ * Mencegah Google Sheets API Rate Limit (429) ketika banyak foto WAITING_RESI.
+ * @param {Array<string>} orderIds - Array nomor pesanan yang resinya kosong
+ * @returns {Map<string, string>} Map orderId -> resi baru (jika ditemukan)
+ */
+async function batchSyncResi(orderIds) {
+    if (!orderIds || orderIds.length === 0) return new Map();
+    
+    const apiKey = process.env.GOOGLE_SHEETS_API_KEY;
+    if (!apiKey || apiKey.includes('ISI_API_KEY')) return new Map();
+
+    const results = new Map(); // orderId -> resi
+
+    try {
+        // Fetch ke-3 toko secara paralel (hanya 3 request total)
+        const fetchPromises = STORES.map(async (store) => {
+            try {
+                const rows = await fetchSheetData(store.spreadsheetId, store.sheetName, apiKey);
+                const offset = store.colOffset;
+                const dataRows = rows.slice(store.dataStartRow - 1);
+
+                for (const row of dataRows) {
+                    const cellOrderId = getCol(row, 'ORDER_ID', offset);
+                    if (orderIds.includes(cellOrderId)) {
+                        const statusRaw = getCol(row, 'STATUS', offset);
+                        const isCancelled = statusRaw.toLowerCase().includes('batal') || statusRaw.toLowerCase().includes('cancel');
+                        
+                        if (!isCancelled) {
+                            const resi = getCol(row, 'RESI', offset);
+                            if (resi && resi.trim() !== '') {
+                                results.set(cellOrderId, resi.trim());
+                            }
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error(`[SHEET] ⚠️ Gagal batch sync toko ${store.name}:`, err.message);
+            }
+        });
+
+        await Promise.all(fetchPromises);
+    } catch (e) {
+        console.error('[SHEET] ❌ Error utama di batchSyncResi:', e.message);
+    }
+
+    return results;
+}
+
+module.exports = { lookupOrder, formatOrderDetailMessage, isPolaroidProduct, getProductAbbreviation, batchSyncResi };

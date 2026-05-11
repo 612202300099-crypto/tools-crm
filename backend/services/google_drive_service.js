@@ -355,6 +355,7 @@ function queueUpload(params) {
  * Jika paralel → 429 Too Many Requests → semua gagal.
  */
 let isProcessingQueue = false;
+let lastBatchSync = 0;
 
 async function processUploadQueue() {
     if (isProcessingQueue) return;
@@ -367,7 +368,44 @@ async function processUploadQueue() {
 
     const db = getDb();
 
-    // 1. Cek apakah ada WAITING_RESI yang sekarang sudah punya resi
+    // 0. BATCH SYNC: Cek Google Sheets untuk customer yang resinya masih kosong (max 1x per 5 menit)
+    const now = Date.now();
+    if (now - lastBatchSync > 5 * 60 * 1000) {
+        try {
+            lastBatchSync = now;
+            const missingResiOrders = db.prepare(`
+                SELECT DISTINCT c.order_id 
+                FROM drive_upload_queue duq
+                JOIN customers c ON c.id = duq.customer_id
+                WHERE duq.status = 'WAITING_RESI' 
+                  AND (c.resi IS NULL OR c.resi = '') 
+                  AND c.order_id IS NOT NULL 
+                  AND c.order_id != ''
+            `).all().map(r => r.order_id);
+
+            if (missingResiOrders.length > 0) {
+                console.log(`[DRIVE] 🔄 Memulai Batch Sync Resi untuk ${missingResiOrders.length} pesanan...`);
+                const spreadsheetService = require('./spreadsheet_service');
+                const newResis = await spreadsheetService.batchSyncResi(missingResiOrders);
+                
+                if (newResis.size > 0) {
+                    const updateStmt = db.prepare(`UPDATE customers SET resi = ? WHERE order_id = ?`);
+                    let updatedCount = 0;
+                    for (const [orderId, resi] of newResis.entries()) {
+                        updateStmt.run(resi, orderId);
+                        updatedCount++;
+                    }
+                    console.log(`[DRIVE] ✅ Batch Sync berhasil mengupdate ${updatedCount} resi dari Spreadsheet!`);
+                } else {
+                    console.log(`[DRIVE] ℹ️ Batch Sync selesai, belum ada resi baru di Spreadsheet.`);
+                }
+            }
+        } catch (syncErr) {
+            console.error('[DRIVE] ⚠️ Gagal menjalankan Batch Sync Resi:', syncErr.message);
+        }
+    }
+
+    // 1. Cek apakah ada WAITING_RESI yang sekarang sudah punya resi (di DB lokal)
     try {
         const waitingList = db.prepare(`
             SELECT duq.id, duq.customer_id, c.resi, c.store_name, c.order_detail
