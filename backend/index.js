@@ -470,12 +470,18 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         stability.heartbeat(); // Kirim detak jantung ke Watchdog
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
         
-        // [FIX TIMEOUT] Abaikan semua pesan dari/ke akun ber-ID LID (Local ID) atau Broadcast.
-        // Chrome/Puppeteer sering macet/timeout jika diminta getChat() untuk tipe kontak abstrak ini.
-        if (message.from.includes('@lid') || message.to.includes('@lid') || message.from === 'status@broadcast') {
+        // [FIX TIMEOUT] Abaikan pesan dari status@broadcast
+        if (message.from === 'status@broadcast') {
             return;
         }
         
+        // [SHIELD LEVEL 2b] Blokir tipe pesan yang tidak relevan SEBELUM getChat agar tidak memblokir semaphore
+        // 'unknown' = metadata LID/reaction internal WA, tidak perlu diproses
+        const BLOCKED_TYPES = ['e2e_notification', 'call_log', 'protocol', 'broadcast_list', 'unknown'];
+        if (BLOCKED_TYPES.includes(message.type)) {
+             return;
+        }
+
         let chat;
         try {
             // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
@@ -500,12 +506,6 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
 
         // [SHIELD LEVEL 2] Blokir System Messages (Status/Broadcast)
         if (message.from === 'status@broadcast' || message.isStatus) {
-             return;
-        }
-        // [SHIELD LEVEL 2b] Blokir tipe pesan yang tidak relevan
-        // 'unknown' = metadata LID/reaction internal WA, tidak perlu diproses
-        const BLOCKED_TYPES = ['e2e_notification', 'call_log', 'protocol', 'broadcast_list', 'unknown'];
-        if (BLOCKED_TYPES.includes(message.type)) {
              return;
         }
 
