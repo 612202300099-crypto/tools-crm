@@ -1313,76 +1313,94 @@ app.post('/api/wa/resync', async (req, res) => {
                 return;
             }
 
-            // [UPGRADE GALI ULANG] - Resolusi Chat ID yang sebenarnya (LID vs C.US)
-            let realChatId = phone_number + '@c.us';
+            // [UPGRADE GALI ULANG v3] - Multi-ChatID Resolution (LID & C.US)
+            // Banyak kasus di mana 50 foto masuk lewat @lid (Facebook Ads), lalu 50 foto sisanya lewat @c.us (setelah dibalas)
+            // Jika kita hanya melacak 1 Chat ID, 50 foto lainnya akan gaib. Kita harus menyisir SEMUA Chat ID milik pelanggan ini!
+            let chatIdsToSync = new Set([phone_number + '@c.us']);
             try {
-                const { data: dbMsg } = await supabase.from('messages')
+                const { data: dbMsgs } = await supabase.from('messages')
                     .select('wa_id')
                     .eq('customer_id', customer_id)
-                    .not('wa_id', 'is', null)
-                    .limit(1);
+                    .not('wa_id', 'is', null);
                     
-                if (dbMsg && dbMsg.length > 0 && dbMsg[0].wa_id) {
-                    const parts = dbMsg[0].wa_id.split('_');
-                    if (parts.length >= 2) {
-                        realChatId = parts[1]; // Dapatkan format asli (misal: xxxx@lid atau xxxx@c.us)
-                        console.log(`[RESYNC] 🎯 Real Chat ID ditemukan: ${realChatId}`);
+                if (dbMsgs && dbMsgs.length > 0) {
+                    for (const msg of dbMsgs) {
+                        if (msg.wa_id) {
+                            const parts = msg.wa_id.split('_');
+                            if (parts.length >= 2) {
+                                chatIdsToSync.add(parts[1]); // Masukkan semua unik Chat ID (baik @lid maupun @c.us)
+                            }
+                        }
                     }
                 }
             } catch (e) {
                 console.warn('[RESYNC] ⚠️ Gagal melacak Real Chat ID dari DB, fallback ke standar.');
             }
 
-            // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
-            const chat = await chromeSemaphore.acquire('API:resync_getChat', () => {
-                return withTimeout(client.getChatById(realChatId), 30000, 'getChatById_resync');
-            }, { priority: 2, timeout: 40000 });
+            console.log(`[RESYNC] 🎯 Ditemukan ${chatIdsToSync.size} titik riwayat (LID/C.US) untuk ${phone_number}. Akan menggali semuanya...`);
 
-            console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number} (Chat ID: ${realChatId})`);
-            const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                // [UPGRADE] Gunakan limit 3000 untuk memastikan pesan dari berhari-hari lalu (seperti foto ratusan) tetap terjangkau.
-                // Tingkatkan juga timeout menjadi 5 menit (300000ms) karena penarikan data lama butuh waktu lebih.
-                return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'fetchMessages_resync');
-            }, { priority: 2, timeout: 350000 });
+            let totalPesanDiproses = 0;
 
-            // [SUPER OPTIMASI] Build cached context SEBELUM loop. 
-            // Daripada memanggil chat.getContact() ratusan kali dan bikin Chrome hang!
-            let cachedContext = null;
-            try {
-                let resolvedPhone = chat.id.user;
-                let pushname = 'Pelanggan';
-                let lidNet = false;
+            for (const targetChatId of chatIdsToSync) {
+                console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number} (Target: ${targetChatId})`);
                 
-                if (chat.id && (chat.id.server === 'lid' || chat.id._serialized.includes('@lid'))) {
-                    lidNet = true;
-                }
-                
-                resolvedPhone = await resolveIdentifier(chat.id._serialized, chat);
                 try {
-                    const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
-                    if (contact && contact.pushname) pushname = contact.pushname;
-                } catch (e) {}
+                    // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
+                    const chat = await chromeSemaphore.acquire('API:resync_getChat', () => {
+                        return withTimeout(client.getChatById(targetChatId), 30000, 'getChatById_resync');
+                    }, { priority: 2, timeout: 40000 });
 
-                cachedContext = {
-                    chat: chat,
-                    customerPhoneNumber: resolvedPhone,
-                    contactPushname: pushname,
-                    isLidNetwork: lidNet
-                };
-                console.log(`[RESYNC] ⚡ Cached Context berhasil dibuat untuk: ${resolvedPhone}`);
-            } catch (e) {
-                console.log(`[RESYNC] ⚠️ Gagal build cached context: ${e.message}`);
+                    const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
+                        // [UPGRADE] Gunakan limit 3000 untuk memastikan pesan dari berhari-hari lalu (seperti foto ratusan) tetap terjangkau.
+                        // Tingkatkan juga timeout menjadi 5 menit (300000ms) karena penarikan data lama butuh waktu lebih.
+                        return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'fetchMessages_resync');
+                    }, { priority: 2, timeout: 350000 });
+
+                    // [SUPER OPTIMASI] Build cached context SEBELUM loop. 
+                    // Daripada memanggil chat.getContact() ratusan kali dan bikin Chrome hang!
+                    let cachedContext = null;
+                    try {
+                        let resolvedPhone = chat.id.user;
+                        let pushname = 'Pelanggan';
+                        let lidNet = false;
+                        
+                        if (chat.id && (chat.id.server === 'lid' || chat.id._serialized.includes('@lid'))) {
+                            lidNet = true;
+                        }
+                        
+                        resolvedPhone = await resolveIdentifier(chat.id._serialized, chat);
+                        try {
+                            const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
+                            if (contact && contact.pushname) pushname = contact.pushname;
+                        } catch (e) {}
+
+                        cachedContext = {
+                            chat: chat,
+                            customerPhoneNumber: resolvedPhone,
+                            contactPushname: pushname,
+                            isLidNetwork: lidNet
+                        };
+                        console.log(`[RESYNC] ⚡ Cached Context berhasil dibuat untuk: ${resolvedPhone}`);
+                    } catch (e) {
+                        console.log(`[RESYNC] ⚠️ Gagal build cached context: ${e.message}`);
+                    }
+
+                    let count = 0;
+                    for (const msg of historyMessages) {
+                        // isPriority=false: jangan menghalangi chat realtime yang masuk
+                        // Pass cachedContext agar tidak memanggil Chrome API per pesan!
+                        await processMessageCommand(msg, true, false, cachedContext);
+                        count++;
+                        totalPesanDiproses++;
+                    }
+
+                    console.log(`[RESYNC] ✅ Selesai! ${count} pesan diproses dari titik ${targetChatId}.`);
+                } catch (err) {
+                    console.error(`[RESYNC ERROR] Gagal menyisir titik ${targetChatId}:`, err.message);
+                }
             }
 
-            let count = 0;
-            for (const msg of historyMessages) {
-                // isPriority=false: jangan menghalangi chat realtime yang masuk
-                // Pass cachedContext agar tidak memanggil Chrome API per pesan!
-                await processMessageCommand(msg, true, false, cachedContext);
-                count++;
-            }
-
-            console.log(`[RESYNC] ✅ Selesai! ${count} pesan diproses untuk ${phone_number}.`);
+            console.log(`[RESYNC] 🏆 TOTAL GALI ULANG SELESAI: ${totalPesanDiproses} pesan diproses untuk ${phone_number}.`);
         } catch (err) {
             console.error(`[RESYNC ERROR] ${phone_number}:`, err.message);
         }
