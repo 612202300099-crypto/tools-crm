@@ -67,6 +67,8 @@ class MediaQueueService {
         this.queue = this.loadQueue();
         this.activeWorkers = 0;
         this.isProcessing = false;
+        this.msgCache = new Map(); // [NEW] Volatile cache for storing msg object references
+        
         
         console.log(`[MEDIA-QUEUE] 🛠️ Inisialisasi v5: ${this.concurrency} worker, max antrian ${this.maxQueueSize}, timeout ${this.downloadTimeout / 1000}s.`);
     }
@@ -127,7 +129,11 @@ class MediaQueueService {
     /**
      * Tambah pekerjaan ke antrian
      */
-    async addToQueue(messageId, customer, messageTimestamp, isPriority = false) {
+    async addToQueue(messageId, customer, messageTimestamp, isPriority = false, msgObj = null) {
+        if (msgObj) {
+            this.msgCache.set(messageId, msgObj);
+        }
+
         if (this.queue.some(job => job.messageId === messageId)) return;
 
         const newJob = {
@@ -251,15 +257,18 @@ class MediaQueueService {
                 `W-${workerId}:download`,
                 async () => {
                     // 1. Dapatkan object pesan asli dari WA
-                    let msg;
-                    try {
-                        msg = await this.withTimeout(
-                            this.client.getMessageById(job.messageId),
-                            30000,
-                            'getMessageById'
-                        );
-                    } catch (e) {
-                        msg = null;
+                    let msg = this.msgCache.get(job.messageId);
+                    
+                    if (!msg) {
+                        try {
+                            msg = await this.withTimeout(
+                                this.client.getMessageById(job.messageId),
+                                30000,
+                                'getMessageById'
+                            );
+                        } catch (e) {
+                            msg = null;
+                        }
                     }
                     
                     // Deep search jika cache hilang
@@ -448,6 +457,8 @@ class MediaQueueService {
         } catch (err) {
             console.error(`[W-${workerId}] ⚠️ Gagal:`, err.message);
             return false;
+        } finally {
+            this.msgCache.delete(job.messageId); // Bersihkan volatile memory
         }
     }
 

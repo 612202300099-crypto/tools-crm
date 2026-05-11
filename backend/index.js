@@ -659,7 +659,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             // [FIX] Bypass Disk Guard: healing tidak perlu cek disk (foto sudah seharusnya masuk)
             console.log(`🩹 HEALING: Re-antri media ${waMessageId} untuk customer ${customerPhoneNumber}`);
             if (customer && customer.id) {
-                mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, true);
+                mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, true, message);
             }
             return; // [FIX KRITIS] STOP di sini — jangan jatuh ke blok if(message.hasMedia) di bawah
         }
@@ -714,7 +714,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
 
                 if (diskOk) {
                     console.log(`[QUEUE] Menambahkan media dari ${customerPhoneNumber} ke antrian latar belakang (Prioritas: ${isPriority})...`);
-                    mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, isPriority);
+                    mediaQueue.addToQueue(waMessageId, customer, msgTimestamp, isPriority, message);
                     
                     // [ANTI-SPAM FIX] Jangan trigger AI Bot jika ini adalah pesan lama hasil Gali Ulang/Resync
                     if (!skipCustomerUpdate) {
