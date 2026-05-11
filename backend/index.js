@@ -165,6 +165,23 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                             return withTimeout(chat.fetchMessages({ limit: 50 }), 20000, 'emergency_fetch');
                         }, { priority: 2, timeout: 30000 });
 
+                        // [SUPER OPTIMASI] Build cached context
+                        let cachedContext = null;
+                        try {
+                            let pushname = 'Pelanggan';
+                            try {
+                                const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
+                                if (contact && contact.pushname) pushname = contact.pushname;
+                            } catch (e) {}
+
+                            cachedContext = {
+                                chat: chat,
+                                customerPhoneNumber: c.phone_number,
+                                contactPushname: pushname,
+                                isLidNetwork: false
+                            };
+                        } catch (e) {}
+
                         let mediaCount = 0;
                         for (const msg of messages) {
                             // Ekstrak teks ke database untuk dibaca
@@ -197,7 +214,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
 
                             // Ekstrak media
                             if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime() / 1000)) {
-                                await processMessageCommand(msg, true); // Ini otomatis mendownload media yang belum ada
+                                await processMessageCommand(msg, true, false, cachedContext); // Pass cachedContext
                                 mediaCount++;
                             }
                         }
@@ -460,7 +477,7 @@ async function hydrateContactCache() {
 }
 
 // CORE ENGINE HANDLER (Diekstrak agar bisa dipakai untuk pesan masuk realtime & sinkronisasi tertinggal)
-async function processMessageCommand(message, skipCustomerUpdate = false, isPriority = false) {
+async function processMessageCommand(message, skipCustomerUpdate = false, isPriority = false, cachedContext = null) {
     try {
         const isFromMe = message.fromMe;
         const waMessageId = message.id._serialized;
@@ -476,51 +493,49 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         }
 
         let chat;
-        try {
-            // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
-            chat = await chromeSemaphore.acquire('getChat', () => {
-                return withTimeout(message.getChat(), 60000, 'getChat');
-            }, { priority: 1, timeout: 90000 });
-        } catch (e) {
-            console.error(`[TIMEOUT-GUARD] getChat gagal/timeout:`, e.message);
-            return;
-        }
-
-        if (chat.isGroup) {
-            // Sembunyikan log grup agar tidak spam
-            return;
-        }
-
-        let isLidNetwork = false;
-        if (chat.id && (chat.id.server === 'lid' || chat.id._serialized.includes('@lid'))) {
-            // Jangan langsung ditolak! Kita akan usahakan me-resolve No HP aslinya dari contact!
-            isLidNetwork = true;
-        }
-
-        // [SHIELD LEVEL 2] Blokir System Messages (Status/Broadcast)
-        if (message.from === 'status@broadcast' || message.isStatus) {
-            return;
-        }
-        // [SHIELD LEVEL 2b] Blokir tipe pesan yang tidak relevan
-        // 'unknown' = metadata LID/reaction internal WA, tidak perlu diproses
-        const BLOCKED_TYPES = ['e2e_notification', 'call_log', 'protocol', 'broadcast_list', 'unknown'];
-        if (BLOCKED_TYPES.includes(message.type)) {
-            return;
-        }
-
-        // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli
-        let customerPhoneNumber = chat.id.user; // Fallback "628xxx" (tanpa @c.us)
+        let customerPhoneNumber;
         let contactPushname = 'Pelanggan Baru';
+        let isLidNetwork = false;
 
-        // [AGRESIVE RESOLVER] Memastikan kita dapat nomor asli, bukan LID
-        customerPhoneNumber = await resolveIdentifier(chat.id._serialized, chat);
+        if (cachedContext) {
+            // [OPTIMASI GALI ULANG] Bypass panggilan berat ke Chrome (getChat, getContact) jika context sudah di-cache!
+            chat = cachedContext.chat;
+            customerPhoneNumber = cachedContext.customerPhoneNumber;
+            contactPushname = cachedContext.contactPushname;
+            isLidNetwork = cachedContext.isLidNetwork;
+            
+            // Masih butuh skip broadcast
+            if (chat.isGroup) return;
+        } else {
+            try {
+                // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
+                chat = await chromeSemaphore.acquire('getChat', () => {
+                    return withTimeout(message.getChat(), 60000, 'getChat');
+                }, { priority: 1, timeout: 90000 });
+            } catch (e) {
+                console.error(`[TIMEOUT-GUARD] getChat gagal/timeout:`, e.message);
+                return;
+            }
 
-        try {
-            const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
-            if (contact && contact.pushname) contactPushname = contact.pushname;
-        } catch (err) { /* silent fallback untuk pushname */ }
+            if (chat.isGroup) return;
 
-        console.log(`[DEBUG] 🔍 Resolved Phone Number: ${customerPhoneNumber} (LID Network: ${isLidNetwork})`);
+            if (chat.id && (chat.id.server === 'lid' || chat.id._serialized.includes('@lid'))) {
+                isLidNetwork = true;
+            }
+
+            // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli
+            customerPhoneNumber = chat.id.user; // Fallback "628xxx" (tanpa @c.us)
+            
+            // [AGRESIVE RESOLVER] Memastikan kita dapat nomor asli, bukan LID
+            customerPhoneNumber = await resolveIdentifier(chat.id._serialized, chat);
+
+            try {
+                const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
+                if (contact && contact.pushname) contactPushname = contact.pushname;
+            } catch (err) { /* silent fallback untuk pushname */ }
+            
+            console.log(`[DEBUG] 🔍 Resolved Phone Number: ${customerPhoneNumber} (LID Network: ${isLidNetwork})`);
+        }
 
         // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
         if (!customerPhoneNumber || customerPhoneNumber.length < 10) {
@@ -1330,10 +1345,40 @@ app.post('/api/wa/resync', async (req, res) => {
                 return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'fetchMessages_resync');
             }, { priority: 2, timeout: 350000 });
 
+            // [SUPER OPTIMASI] Build cached context SEBELUM loop. 
+            // Daripada memanggil chat.getContact() ratusan kali dan bikin Chrome hang!
+            let cachedContext = null;
+            try {
+                let resolvedPhone = chat.id.user;
+                let pushname = 'Pelanggan';
+                let lidNet = false;
+                
+                if (chat.id && (chat.id.server === 'lid' || chat.id._serialized.includes('@lid'))) {
+                    lidNet = true;
+                }
+                
+                resolvedPhone = await resolveIdentifier(chat.id._serialized, chat);
+                try {
+                    const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
+                    if (contact && contact.pushname) pushname = contact.pushname;
+                } catch (e) {}
+
+                cachedContext = {
+                    chat: chat,
+                    customerPhoneNumber: resolvedPhone,
+                    contactPushname: pushname,
+                    isLidNetwork: lidNet
+                };
+                console.log(`[RESYNC] ⚡ Cached Context berhasil dibuat untuk: ${resolvedPhone}`);
+            } catch (e) {
+                console.log(`[RESYNC] ⚠️ Gagal build cached context: ${e.message}`);
+            }
+
             let count = 0;
             for (const msg of historyMessages) {
                 // isPriority=false: jangan menghalangi chat realtime yang masuk
-                await processMessageCommand(msg, true, false);
+                // Pass cachedContext agar tidak memanggil Chrome API per pesan!
+                await processMessageCommand(msg, true, false, cachedContext);
                 count++;
             }
 
