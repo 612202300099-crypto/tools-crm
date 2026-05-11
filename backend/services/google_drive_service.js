@@ -303,6 +303,26 @@ function queueUpload(params) {
 
     try {
         const db = getDb();
+        
+        // [FIX] Anti-Duplikat: Jika file_url atau storage_key sudah sukses di-upload, jangan antrikan lagi
+        if (fileUrl || storageKey) {
+            const existing = db.prepare(`
+                SELECT id FROM drive_upload_queue 
+                WHERE (file_url = ? OR (storage_key = ? AND storage_key IS NOT NULL)) 
+                  AND status = 'DONE'
+                LIMIT 1
+            `).get(fileUrl, storageKey || null);
+            
+            if (existing) {
+                console.log(`[DRIVE] ℹ️ Media sudah pernah di-upload ke Drive. Skip antrian.`);
+                return;
+            }
+        }
+
+        // [FIX] Anti-Folder Nyasar: Hanya set PENDING jika RESI dan STORE_NAME sudah ada.
+        // Jika salah satu belum ada, masuk WAITING_RESI agar antre sampai data lengkap.
+        const initialStatus = (resi && storeName) ? 'PENDING' : 'WAITING_RESI';
+
         db.prepare(`
             INSERT INTO drive_upload_queue
                 (customer_id, media_id, file_url, storage_key, storage_type,
@@ -313,9 +333,9 @@ function queueUpload(params) {
             customerId, mediaId || null, fileUrl, storageKey || null, storageType || 'local',
             orderId || null, storeName || null, resi || null, productAbbr || 'LAINNYA', sku || null,
             photoIndex || 1, customerPhone || null,
-            resi ? 'PENDING' : 'WAITING_RESI'
+            initialStatus
         );
-        console.log(`[DRIVE] 📥 Queued: ${productAbbr} foto-${photoIndex} | resi: ${resi || 'WAITING'} | ${storageKey || fileUrl}`);
+        console.log(`[DRIVE] 📥 Queued: ${productAbbr} foto-${photoIndex} | status: ${initialStatus} | ${storageKey || fileUrl}`);
     } catch (e) {
         // Jika kolom photo_index/customer_phone belum ada di tabel lama, fallback
         if (e.message && e.message.includes('no column')) {
@@ -405,13 +425,15 @@ async function processUploadQueue() {
         }
     }
 
-    // 1. Cek apakah ada WAITING_RESI yang sekarang sudah punya resi (di DB lokal)
+    // 1. Cek apakah ada WAITING_RESI yang sekarang sudah punya data lengkap (di DB lokal)
     try {
         const waitingList = db.prepare(`
             SELECT duq.id, duq.customer_id, c.resi, c.store_name, c.order_detail
             FROM drive_upload_queue duq
             JOIN customers c ON c.id = duq.customer_id
-            WHERE duq.status = 'WAITING_RESI' AND c.resi IS NOT NULL AND c.resi != ''
+            WHERE duq.status = 'WAITING_RESI' 
+              AND c.resi IS NOT NULL AND c.resi != ''
+              AND c.store_name IS NOT NULL AND c.store_name != ''
         `).all();
 
         for (const item of waitingList) {
