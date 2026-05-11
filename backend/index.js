@@ -14,11 +14,11 @@ const fs = require('fs');
 const path = require('path');
 const cron = require('node-cron');
 const chromeSemaphore = require('./services/chrome_semaphore');
-const cleanupService     = require('./services/cleanup_service');
-const StabilityManager   = require('./services/stability_manager');
-const MediaQueueService  = require('./services/media_queue_service');
-const objectStorage      = require('./services/object_storage_service');
-const pendingOrderSvc    = require('./services/pending_order_service');
+const cleanupService = require('./services/cleanup_service');
+const StabilityManager = require('./services/stability_manager');
+const MediaQueueService = require('./services/media_queue_service');
+const objectStorage = require('./services/object_storage_service');
+const pendingOrderSvc = require('./services/pending_order_service');
 const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
 
 const { router: localApiRouter, authenticateToken } = require('./api');
@@ -85,7 +85,7 @@ async function safeDbCall(operation, label = 'DB_OP', retries = 3) {
             const isNetworkError = err.message?.includes('fetch') || err.message?.includes('timeout') || err.code === 'UND_ERR_CONNECT_TIMEOUT';
             if (isNetworkError && i < retries - 1) {
                 const delay = (i + 1) * 2000;
-                console.warn(`[${label}] ⚠️ Koneksi DB gagal (Percobaan ${i+1}/${retries}). Mencoba lagi dalam ${delay}ms...`);
+                console.warn(`[${label}] ⚠️ Koneksi DB gagal (Percobaan ${i + 1}/${retries}). Mencoba lagi dalam ${delay}ms...`);
                 await sleep(delay);
                 continue;
             }
@@ -101,7 +101,7 @@ app.use(express.json());
 // --- DEBUG LOGGING MIDDLEWARE ---
 app.use((req, res, next) => {
     if ((req.url.includes('/login') || req.url.includes('/api/')) && !req.url.includes('/drive-status')) {
-        console.log(`[REQ] ${req.method} ${req.url} from ${req.headers.origin || 'unknown'} - Body:`, req.body ? JSON.stringify(req.body).substring(0,100) : 'none');
+        console.log(`[REQ] ${req.method} ${req.url} from ${req.headers.origin || 'unknown'} - Body:`, req.body ? JSON.stringify(req.body).substring(0, 100) : 'none');
     }
     next();
 });
@@ -120,29 +120,29 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
             console.log('\\n=========================================================');
             console.log(`[EMERGENCY] 🚨 Memulai "Sapu Jagat" untuk ${daysBack} hari terakhir...`);
             console.log('=========================================================\\n');
-            
+
             const targetDate = new Date();
             targetDate.setDate(targetDate.getDate() - daysBack);
-            
+
             // Ambil semua customer dari 2 hari lalu yang belum VALIDATED
             // (yang sudah VALIDATED berarti fotonya sudah beres diverifikasi)
             // [CRITICAL FIX] Urutkan dari yang paling LAMA (ASC) agar pelanggan yang paling menderita menunggu lama segera diselamatkan lebih dulu.
             const customers = db.prepare("SELECT * FROM customers WHERE created_at >= ? AND status != 'VALIDATED' ORDER BY created_at ASC").all(targetDate.toISOString());
-            
+
             console.log(`[EMERGENCY] Ditemukan ${customers.length} customer untuk disisir ulang.`);
 
             let successCount = 0;
-            
+
             for (const c of customers) {
                 try {
                     console.log(`\\n[EMERGENCY] 🔍 Memproses: ${c.phone_number} (Order: ${c.order_id || 'KOSONG'})`);
-                    
+
                     // 1. RE-LOOKUP SPREADSHEET (Mencocokkan ulang data yang baru diupdate)
                     if (c.order_id) {
                         const lookup = await lookupOrder(c.order_id, { bypassCache: true });
                         if (lookup && lookup.found) {
                             db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
-                              .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
+                                .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
                             c.resi = lookup.resi;
                             c.store_name = lookup.storeName;
                             c.order_detail = JSON.stringify(lookup.items);
@@ -170,8 +170,8 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                             // Ekstrak teks ke database untuk dibaca
                             if (msg.type === 'chat' && msg.body) {
                                 db.prepare(`INSERT OR IGNORE INTO messages (id, customer_id, body, is_from_me, created_at) VALUES (?, ?, ?, ?, ?)`)
-                                  .run(msg.id.id, c.id, msg.body, msg.fromMe ? 1 : 0, new Date(msg.timestamp * 1000).toISOString());
-                                
+                                    .run(msg.id.id, c.id, msg.body, msg.fromMe ? 1 : 0, new Date(msg.timestamp * 1000).toISOString());
+
                                 // [CRITICAL PINTAR] Baca Nomor Order dari pesan pelanggan yang baru digali!
                                 if (!msg.fromMe && !c.order_id) {
                                     const orderIdMatch = msg.body.match(/\b\d{10,20}\b/);
@@ -180,12 +180,12 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                                         console.log(`[EMERGENCY] 🔎 Ditemukan No Order dari chat lama: ${foundOrderId}`);
                                         db.prepare('UPDATE customers SET order_id = ? WHERE id = ?').run(foundOrderId, c.id);
                                         c.order_id = foundOrderId;
-                                        
+
                                         // Segera cek ke Spreadsheet agar mendapat resi!
                                         const lookup = await lookupOrder(c.order_id, { bypassCache: true });
                                         if (lookup && lookup.found) {
                                             db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
-                                              .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
+                                                .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), c.id);
                                             c.resi = lookup.resi;
                                             c.store_name = lookup.storeName;
                                             c.order_detail = JSON.stringify(lookup.items);
@@ -196,7 +196,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                             }
 
                             // Ekstrak media
-                            if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime()/1000)) {
+                            if (msg.hasMedia && msg.timestamp >= Math.floor(targetDate.getTime() / 1000)) {
                                 await processMessageCommand(msg, true); // Ini otomatis mendownload media yang belum ada
                                 mediaCount++;
                             }
@@ -220,7 +220,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                     const mediaList = db.prepare('SELECT * FROM media WHERE customer_id = ?').all(c.id);
                     let pushedDrive = 0;
 
-                    
+
                     if (mediaList.length > 0) {
                         // [FIX FOLDER LAINNYA] Ambil productAbbr (POLAROID) dan SKU dari detail pesanan
                         let productAbbr = 'LAINNYA';
@@ -241,11 +241,11 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
                                 const existing = db.prepare('SELECT id, status FROM drive_upload_queue WHERE media_id = ?').get(media.id);
                                 if (!existing) {
                                     db.prepare(`INSERT INTO drive_upload_queue (customer_id, media_id, file_url, storage_key, storage_type, order_id, store_name, resi, product_abbr, sku, photo_index, customer_phone, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING')`)
-                                      .run(c.id, media.id, media.file_url, media.storage_key, media.storage_type, c.order_id, c.store_name, c.resi, productAbbr, sku, media.id, c.phone_number);
+                                        .run(c.id, media.id, media.file_url, media.storage_key, media.storage_type, c.order_id, c.store_name, c.resi, productAbbr, sku, media.id, c.phone_number);
                                     pushedDrive++;
                                 } else if (existing.status !== 'DONE' && existing.status !== 'SKIPPED') {
                                     db.prepare(`UPDATE drive_upload_queue SET status = 'PENDING', resi = ?, store_name = ?, product_abbr = ?, sku = ?, retry_count = 0 WHERE id = ?`)
-                                      .run(c.resi, c.store_name, productAbbr, sku, existing.id);
+                                        .run(c.resi, c.store_name, productAbbr, sku, existing.id);
                                     pushedDrive++;
                                 }
                             }
@@ -259,7 +259,7 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
 
                     successCount++;
                     // [PENTING] Jeda 1 detik agar tidak meng-DDoS Chrome / CPU VPS
-                    await sleep(1000); 
+                    await sleep(1000);
                 } catch (err) {
                     console.error(`[EMERGENCY] ❌ Error memproses customer ${c.phone_number}:`, err.message);
                 }
@@ -371,7 +371,7 @@ const client = new Client({
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--disable-renderer-backgrounding',
-            '--js-flags=--max-old-space-size=2048'  // Ditingkatkan ke 2048MB agar tidak OOM saat me-load ribuan kontak
+            '--js-flags=--max-old-space-size=512'  // 512MB lebih aman di VPS
         ]
     }
 });
@@ -397,7 +397,7 @@ const mediaQueue = new MediaQueueService(client, supabase, {
 // FUNGSI PENDUKUNG: Resolving LID ke Nomor HP asli secara agresif
 async function resolveIdentifier(id, chatObject = null) {
     const serialized = id.includes('@') ? id : (id.includes('-') ? id + '@g.us' : id + '@c.us');
-    
+
     // 1. Cek Cache Global
     if (contactCache.has(serialized)) {
         return contactCache.get(serialized);
@@ -469,17 +469,11 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
 
         stability.heartbeat(); // Kirim detak jantung ke Watchdog
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
-        
-        // [FIX TIMEOUT] Abaikan pesan dari status@broadcast
-        if (message.from === 'status@broadcast') {
+
+        // [FIX TIMEOUT] Abaikan semua pesan dari/ke akun ber-ID LID (Local ID) atau Broadcast.
+        // Chrome/Puppeteer sering macet/timeout jika diminta getChat() untuk tipe kontak abstrak ini.
+        if (message.from.includes('@lid') || message.to.includes('@lid') || message.from === 'status@broadcast') {
             return;
-        }
-        
-        // [SHIELD LEVEL 2b] Blokir tipe pesan yang tidak relevan SEBELUM getChat agar tidak memblokir semaphore
-        // 'unknown' = metadata LID/reaction internal WA, tidak perlu diproses
-        const BLOCKED_TYPES = ['e2e_notification', 'call_log', 'protocol', 'broadcast_list', 'unknown'];
-        if (BLOCKED_TYPES.includes(message.type)) {
-             return;
         }
 
         let chat;
@@ -494,50 +488,56 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         }
 
         if (chat.isGroup) {
-             // Sembunyikan log grup agar tidak spam
-             return;
+            // Sembunyikan log grup agar tidak spam
+            return;
         }
 
         let isLidNetwork = false;
         if (chat.id && (chat.id.server === 'lid' || chat.id._serialized.includes('@lid'))) {
-             // Jangan langsung ditolak! Kita akan usahakan me-resolve No HP aslinya dari contact!
-             isLidNetwork = true;
+            // Jangan langsung ditolak! Kita akan usahakan me-resolve No HP aslinya dari contact!
+            isLidNetwork = true;
         }
 
         // [SHIELD LEVEL 2] Blokir System Messages (Status/Broadcast)
         if (message.from === 'status@broadcast' || message.isStatus) {
-             return;
+            return;
+        }
+        // [SHIELD LEVEL 2b] Blokir tipe pesan yang tidak relevan
+        // 'unknown' = metadata LID/reaction internal WA, tidak perlu diproses
+        const BLOCKED_TYPES = ['e2e_notification', 'call_log', 'protocol', 'broadcast_list', 'unknown'];
+        if (BLOCKED_TYPES.includes(message.type)) {
+            return;
         }
 
         // PENENTUAN NOMOR HP CUSTOMER: Menggunakan getContact() dari WA memastikan kita dapat nomor asli
         let customerPhoneNumber = chat.id.user; // Fallback "628xxx" (tanpa @c.us)
         let contactPushname = 'Pelanggan Baru';
-        
+
         // [AGRESIVE RESOLVER] Memastikan kita dapat nomor asli, bukan LID
         customerPhoneNumber = await resolveIdentifier(chat.id._serialized, chat);
-        
+
         try {
             const contact = await withTimeout(chat.getContact(), 5000, 'getPushname');
             if (contact && contact.pushname) contactPushname = contact.pushname;
         } catch (err) { /* silent fallback untuk pushname */ }
-        
+
         console.log(`[DEBUG] 🔍 Resolved Phone Number: ${customerPhoneNumber} (LID Network: ${isLidNetwork})`);
 
         // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
         if (!customerPhoneNumber || customerPhoneNumber.length < 10) {
-             console.log(`[DEBUG] 🛡️ Menolak karena nomor HP tidak valid/kosong.`);
-             return;
+            console.log(`[DEBUG] 🛡️ Menolak karena nomor HP tidak valid/kosong.`);
+            return;
         }
-        
+
         // PENTING: Mencegah penciptaan Data Customer Siluman dari jaringan LID.
         // KECUALI jika pesan tersebut memiliki MEDIA (Gambar/Foto). 
         // Lebih baik punya data "Nomor Aneh" daripada pesanan/foto customer hilang sama sekali.
         if (isLidNetwork && customerPhoneNumber === String(chat.id.user).replace(/\D/g, '')) {
-             if (!message.hasMedia) {
-                 console.log(`[DEBUG] 🛑 [BLOCK] Mengabaikan teks LID tanpa media: ${customerPhoneNumber}`);
-                 return;
-             }
-             console.log(`[DEBUG] ⚠️ [ALLOW-BY-MEDIA] Meloloskan LID ${customerPhoneNumber} karena memiliki media penting.`);
+            if (!message.hasMedia) {
+                console.log(`[DEBUG] 🛑 [BLOCK] Mengabaikan teks LID tanpa media: ${customerPhoneNumber}`);
+                return;
+            }
+            console.log(`[DEBUG] ⚠️ [ALLOW-BY-MEDIA] Meloloskan LID ${customerPhoneNumber} karena memiliki media penting.`);
         }
 
         // [HISTORY REVOKE SAFE-MODE] Jika sinkronisasi menangkap riwayat pesan ditarik (Poin 2)
@@ -546,26 +546,26 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             if (message._data && message._data.protocolMessageKey && message._data.protocolMessageKey.id) {
                 targetHash = message._data.protocolMessageKey.id;
             } else if (message.id && message.id.id) {
-                targetHash = message.id.id; 
+                targetHash = message.id.id;
             }
 
             if (!targetHash) {
-                 console.log("⚠️ [HISTORY REVOKE FAIL-SAFE] Referensi ID asli hilang. Pembatalan diblokir untuk keamanan.");
-                 return;
+                console.log("⚠️ [HISTORY REVOKE FAIL-SAFE] Referensi ID asli hilang. Pembatalan diblokir untuk keamanan.");
+                return;
             }
 
             const { data: dbMsg } = await supabase.from('messages').select('id, is_deleted, customer_id').eq('message_hash', targetHash).single();
             if (dbMsg) {
                 if (dbMsg.is_deleted) return; // Idempotent check
                 console.log(`🗑️ [HISTORY REVOKE] Menjalankan 3-Layer Sinkronisasi pada Hash: ${targetHash}...`);
-                
+
                 // LAYER 2: Hapus dari Object Storage/Disk (Non-Blocking). LAYER 3: Hapus DB Media
                 const { data: mediaData } = await supabase.from('media').select('id, file_name, storage_key, storage_type').eq('message_id', dbMsg.id);
                 if (mediaData && mediaData.length > 0) {
                     for (const m of mediaData) {
                         const storageType = m.storage_type || 'local';
-                        const storageKey  = m.storage_key  || m.file_name;
-                        await objectStorage.deleteMedia(storageKey, storageType).catch(() => {});
+                        const storageKey = m.storage_key || m.file_name;
+                        await objectStorage.deleteMedia(storageKey, storageType).catch(() => { });
                         await supabase.from('media').delete().eq('id', m.id);
                     }
                 }
@@ -596,7 +596,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                         phone_number: customerPhoneNumber,
                         name: contactPushname,
                         status: 'BELUM_KIRIM_FOTO',
-                        created_at: msgTimestamp 
+                        created_at: msgTimestamp
                     }).select().single(),
                     'createCustomer'
                 );
@@ -620,7 +620,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                 await supabase.from('customers').update({ created_at: msgTimestamp }).eq('id', customer.id);
             }
         }
-        
+
         console.log(`[DEBUG] 📬 Lolos! Memasukkan ke tabel messages (Duplicate Check run...)`);
 
         // 0. ANTI-DUPLIKAT (Cek Kesamaan Kode KTP WA_ID Asli menggunakan Constraint Hash Lintas Prefix)
@@ -631,7 +631,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             const { data: duplicate } = await supabase
                 .from('messages')
                 .select('id')
-                .eq('message_hash', secureMessageHash) 
+                .eq('message_hash', secureMessageHash)
                 .limit(1);
 
             if (duplicate && duplicate.length > 0) {
@@ -669,19 +669,19 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         // Pesan BARU (bukan duplikat) — insert ke DB
         try {
             const { data: msgData } = await safeDbCall(
-                    () => supabase.from('messages').insert({
-                        customer_id: customer.id,
-                        wa_id: waMessageId,
-                        message_hash: secureMessageHash, 
-                        body: message.body || (message.hasMedia ? '[Attachment Dokumen/Gambar]' : ''),
-                        is_from_me: isFromMe,
-                        created_at: msgTimestamp
-                    }).select().single(),
-                    'insertMessage'
-                );
-                messageRecord = msgData;
-            } catch (msgError) {
-                console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message);
+                () => supabase.from('messages').insert({
+                    customer_id: customer.id,
+                    wa_id: waMessageId,
+                    message_hash: secureMessageHash,
+                    body: message.body || (message.hasMedia ? '[Attachment Dokumen/Gambar]' : ''),
+                    is_from_me: isFromMe,
+                    created_at: msgTimestamp
+                }).select().single(),
+                'insertMessage'
+            );
+            messageRecord = msgData;
+        } catch (msgError) {
+            console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message);
             console.error("❌ ERROR FATAL INSERT DATABASE MESSAGE:", msgError.message);
         }
         if (message.hasMedia) {
@@ -707,7 +707,7 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                             if (!global._lastDiskCleanupTime || (now - global._lastDiskCleanupTime) > 5 * 60 * 1000) {
                                 global._lastDiskCleanupTime = now;
                                 console.log('[DISK-GUARD] 🧹 Memicu cleanup darurat (cooldown 5 menit)...');
-                                cleanupService(true).catch(() => {});
+                                cleanupService(true).catch(() => { });
                             }
                         }
                     }
@@ -745,7 +745,7 @@ client.on('qr', (qr) => {
     isConnected = false;
     console.log('New QR code generated - please scan');
     // Print QR ke terminal agar bisa scan langsung dari SSH
-    try { qrcode.generate(qr, { small: true }); } catch(e) {}
+    try { qrcode.generate(qr, { small: true }); } catch (e) { }
 });
 
 client.on('ready', async () => {
@@ -753,29 +753,100 @@ client.on('ready', async () => {
     console.log('✅ WhatsApp Client is ready!');
     isConnected = true;
     qrCodeData = '';
-    
+
     stability.start();
-    
-    // [HYDRATION] DINONAKTIFKAN (Penyebab Utama Chrome Freeze / TIMEOUT_GET_STATE)
-    // Menarik 8000+ kontak sekaligus membuat Memory Chrome (V8) meledak (OOM).
-    // Sebagai gantinya, sistem akan melakukan "Lazy Resolve" pada resolveIdentifier()
-    console.log('[SYSTEM] Global Contact Hydration dinonaktifkan untuk menghemat RAM Chrome.');
+    await hydrateContactCache();
 
     // [PENDING-ORDER] Inject dependensi ke pending order service
     pendingOrderSvc.init(client, supabase);
     console.log('[SYSTEM] 📦 Pending Order Service siap — retry otomatis setiap 5 menit.');
 
     // [OBJECT-STORAGE] Cek koneksi object storage saat startup
-    objectStorage.healthCheck().catch(() => {});
+    objectStorage.healthCheck().catch(() => { });
 
-    // [STARTUP SYNC] DINONAKTIFKAN (Penyebab Chrome Freeze & Pesan Baru Tidak Masuk)
-    // Melakukan fetchMessages pada ratusan chat saat startup terbukti membuat memory Puppeteer
-    // membengkak (bloat) dan menulikan (deafen) event listener 'message_create'.
-    // Sebagai gantinya, sistem akan mengandalkan pesan real-time dan Emergency Sync manual.
-    console.log(`[SYNC] Startup Sync dinonaktifkan untuk menjaga kestabilan memori WhatsApp Web.`);
-    
-    // Kurangi waktu setBusy agar antrean lain (Drive/Pending Order) bisa langsung jalan
-    stability.setBusy(60 * 1000); 
+    // [STARTUP SYNC] Ambil pesan 48 jam terakhir
+    // setBusy: Watchdog tidak akan restart selama startup sync berjalan
+    // [FIX] 15 menit tidak cukup — log menunjukkan sync bisa >20 menit
+    // Diperpanjang ke 30 menit (max yang diizinkan setBusy)
+    const estimatedSyncMinutes = 30;
+    stability.setBusy(estimatedSyncMinutes * 60 * 1000);
+
+    try {
+        let chats = [];
+        try {
+            chats = await withTimeout(client.getChats(), 60000, 'getChats_startup');
+        } catch (getChatsErr) {
+            console.error('❌ Gagal mengambil daftar chat saat startup:', getChatsErr.message);
+            return;
+        }
+
+        const targetDate = new Date();
+        // [OPTIMASI EXTREME] Ubah dari 48 jam (2 hari) menjadi 6 jam saja!
+        // Jika server mati sebentar, 6 jam sudah sangat cukup untuk mengejar chat yang terlewat.
+        // 48 jam akan memaksa Chrome memproses ribuan chat, menyebabkan TIMEOUT dan CRASH.
+        targetDate.setHours(targetDate.getHours() - 6);
+        const limitTimestamp = Math.floor(targetDate.getTime() / 1000);
+        console.log(`[SYNC] 🕐 Menyinkronkan pesan sejak: ${targetDate.toLocaleString('id-ID')} (6 Jam Terakhir) | Total chat: ${chats.length}`);
+
+        let processedCount = 0;
+        let skippedCount = 0;
+        let errorCount = 0;
+
+        for (const chat of chats) {
+            if (chat.isGroup || chat.id.user === 'status' || chat.id.user === 'broadcast') continue;
+
+            // [OPT] Skip chat tanpa lastMessage atau pesan sudah lama — sebelum buka Chrome
+            if (!chat.lastMessage || chat.lastMessage.timestamp < limitTimestamp) {
+                skippedCount++;
+                continue;
+            }
+
+            try {
+                // Heartbeat per chat — reset Watchdog consecutiveFailures
+                stability.heartbeat();
+
+                // [OPT] Limit 15 (dari 30) — cukup untuk healing pesan-pesan terakhir yang terlewat, tidak memblokir event loop Chrome
+                let historyMessages = [];
+                try {
+                    historyMessages = await chromeSemaphore.acquire('SYNC:fetchMessages', () => {
+                        return withTimeout(
+                            chat.fetchMessages({ limit: 15 }),
+                            45000,
+                            'fetchMessages_startup'
+                        );
+                    }, { priority: 2, timeout: 90000 });
+                } catch (fetchErr) {
+                    console.warn(`[SYNC] ⚠️ Skip chat ${chat.id.user}: ${fetchErr.message.substring(0, 60)}`);
+                    errorCount++;
+                    continue;
+                }
+
+                for (const msg of historyMessages) {
+                    if (msg.timestamp >= limitTimestamp) {
+                        processedCount++;
+                        await processMessageCommand(msg, true);
+                    }
+                }
+
+                // Log progress setiap 50 chat aktif
+                const totalDone = processedCount + skippedCount + errorCount;
+                if (totalDone > 0 && totalDone % 50 === 0) {
+                    console.log(`[SYNC] 📊 Progress: ${totalDone}/${chats.length} | Pesan: ${processedCount} | Skip: ${skippedCount} | Err: ${errorCount}`);
+                }
+
+                // [CRITICAL FIX] Jeda 300ms setiap selesai 1 chat. 
+                // Ini mencegah Node.js Event Loop dan main thread Chrome dari pembekuan (DDoS internal).
+                await sleep(300);
+
+            } catch (chatErr) {
+                errorCount++;
+                console.error(`⚠️ Gagal menyisir chat ${chat.id.user}:`, chatErr.message);
+            }
+        }
+        console.log(`✅ [SYNC] Selesai! Diproses: ${processedCount} pesan | Dilewati: ${skippedCount} chat lama | Error: ${errorCount} chat`);
+    } catch (e) {
+        console.error('⚠️ Gagal total sinkronisasi pesan offline:', e.message);
+    }
 });
 
 
@@ -821,29 +892,30 @@ client.on('disconnected', async (reason) => {
 
 // Gunakan message_create agar menangkap pesan dari kita juga (yang dikirim lewat HP)
 client.on('message_create', async (message) => {
-    await processMessageCommand(message);
+    // REAL-TIME selalu PRIORITAS UTAMA (isPriority = true)
+    await processMessageCommand(message, false, true);
 });
 
 // Menangkap event Penghapusan Pesan (Tarik Pesan) secara Real-time
 client.on('message_revoke_everyone', async (after, before) => {
     try {
-        if(!after) return;
-        
+        if (!after) return;
+
         // Poin 2: Wajib Referensi Asli (Jangan menebak hash baru!)
         let targetHash = null;
         if (before && before.id && before.id.id) {
-             targetHash = before.id.id; // Kebenaran 1: Memori WA Asli
+            targetHash = before.id.id; // Kebenaran 1: Memori WA Asli
         } else if (after._data && after._data.protocolMessageKey && after._data.protocolMessageKey.id) {
-             targetHash = after._data.protocolMessageKey.id; // Kebenaran 2: Raw Protocol Storage
+            targetHash = after._data.protocolMessageKey.id; // Kebenaran 2: Raw Protocol Storage
         }
 
         if (!targetHash) {
-             console.log(`⚠️ [REVOKE GUARD SKIP] Referensi ID Target asli kosong (Protocol ID: ${after.id._serialized}). Mencegah Salah Hapus.`);
-             return;
+            console.log(`⚠️ [REVOKE GUARD SKIP] Referensi ID Target asli kosong (Protocol ID: ${after.id._serialized}). Mencegah Salah Hapus.`);
+            return;
         }
 
         console.log(`ℹ️ [REVOKE EVENT] Mencari Hash Pesan Asli (SOT): ${targetHash}...`);
-        
+
         // Poin 1 & 4: Pencarian dan Idempotent Lock
         const { data: dbMsg } = await supabase
             .from('messages')
@@ -852,13 +924,13 @@ client.on('message_revoke_everyone', async (after, before) => {
             .single();
 
         if (!dbMsg) {
-             console.log(`❌ [REVOKE GAGAL] Pesan Hash ${targetHash} tidak ditemukan dalam penyimpanan DB.`);
-             return;
+            console.log(`❌ [REVOKE GAGAL] Pesan Hash ${targetHash} tidak ditemukan dalam penyimpanan DB.`);
+            return;
         }
 
         if (dbMsg.is_deleted) {
-             console.log(`⏭️ [REVOKE SKIP] Idempotent: Pesan Hash ${targetHash} sudah pernah ditandai terhapus.`);
-             return;
+            console.log(`⏭️ [REVOKE SKIP] Idempotent: Pesan Hash ${targetHash} sudah pernah ditandai terhapus.`);
+            return;
         }
 
         // Poin 1 Lanjutan: Validasi Ruang Obrolan
@@ -868,16 +940,16 @@ client.on('message_revoke_everyone', async (after, before) => {
                 let checkPhone = chat.id.user;
                 const contact = await withTimeout(chat.getContact(), 4000, 'getContact_revoke');
                 if (contact && contact.number) checkPhone = String(contact.number).replace(/\D/g, '');
-                
+
                 const { data: custInfo } = await supabase.from('customers').select('id').eq('phone_number', checkPhone).single();
                 if (custInfo && custInfo.id !== dbMsg.customer_id) {
-                     console.log(`⛔ [FATAL SHIELD] Batal menghapus ${targetHash}! Kepemilikan (Customer ID) bentrok (Anti-Salah-Hapus).`);
-                     return;
+                    console.log(`⛔ [FATAL SHIELD] Batal menghapus ${targetHash}! Kepemilikan (Customer ID) bentrok (Anti-Salah-Hapus).`);
+                    return;
                 }
             }
         } catch (e) {
-             // Jika protokol tak bisa dilacak chat-nya, abaikan verifikasi ini dan percaya pada spesifikasi Hash Unik.
-             console.log(`ℹ️ [REVOKE INFO] Tidak dapat memverifikasi pengirim via chat protocol, tapi Hash Unik dikonfirmasi valid.`);
+            // Jika protokol tak bisa dilacak chat-nya, abaikan verifikasi ini dan percaya pada spesifikasi Hash Unik.
+            console.log(`ℹ️ [REVOKE INFO] Tidak dapat memverifikasi pengirim via chat protocol, tapi Hash Unik dikonfirmasi valid.`);
         }
 
         // LAYER 2: Hapus dari Object Storage/Disk (Non-Blocking). LAYER 3: Hapus DB Media
@@ -885,7 +957,7 @@ client.on('message_revoke_everyone', async (after, before) => {
         if (mediaData && mediaData.length > 0) {
             for (const m of mediaData) {
                 const storageType = m.storage_type || 'local';
-                const storageKey  = m.storage_key  || m.file_name;
+                const storageKey = m.storage_key || m.file_name;
                 await objectStorage.deleteMedia(storageKey, storageType).catch(e => {
                     console.log(`ℹ️ Media ${m.file_name} tidak dapat dihapus: ${e.message}`);
                 });
@@ -895,8 +967,8 @@ client.on('message_revoke_everyone', async (after, before) => {
 
         // LAYER 1: Terakhir, Soft Delete tabel messages
         await supabase.from('messages').update({
-             is_deleted: true,
-             deleted_at: new Date().toISOString()
+            is_deleted: true,
+            deleted_at: new Date().toISOString()
         }).eq('id', dbMsg.id);
 
         console.log(`✅ [3-LAYER SYNC SUCCESS] Pesan Asli (Hash: ${targetHash}) resmi Lenyap & Soft-Deleted secara aman!`);
@@ -914,9 +986,9 @@ app.post('/api/wa/deep-resync', async (req, res) => {
     const endTs = end_date ? Math.floor(new Date(end_date).getTime() / 1000) : Math.floor(Date.now() / 1000);
 
     // Kirim respons segera (Background Task)
-    res.json({ 
-        success: true, 
-        message: 'Deep Resync dimulai di latar belakang. Pantau progres di PM2 Logs.' 
+    res.json({
+        success: true,
+        message: 'Deep Resync dimulai di latar belakang. Pantau progres di PM2 Logs.'
     });
 
     // Jalankan proses di background
@@ -931,17 +1003,17 @@ app.post('/api/wa/deep-resync', async (req, res) => {
                 if (chat.lastMessage && chat.lastMessage.timestamp < startTs) continue;
 
                 console.log(`[BACKGROUND-RESYNC] Menyisir chat ${chat.id.user}...`);
-                
+
                 // [STABILITAS] Retry loop untuk menangani Detached Frame
                 let success = false;
                 let retries = 0;
-                
+
                 while (!success && retries < 2) {
                     try {
                         // Re-fetch chat object untuk menyegarkan Frame context jika ini adalah retry
                         const activeChat = (retries > 0) ? await client.getChatById(chat.id._serialized) : chat;
                         const messages = await withTimeout(activeChat.fetchMessages({ limit: 100 }), 30000, 'fetchMessages_deep');
-                        
+
                         for (const msg of messages) {
                             if (msg.timestamp >= startTs && msg.timestamp <= endTs) {
                                 // Background Resync masal menggunakan Prioritas Normal (false)
@@ -955,11 +1027,11 @@ app.post('/api/wa/deep-resync', async (req, res) => {
                     } catch (chatErr) {
                         retries++;
                         if (chatErr.message.includes('detached') || chatErr.message.includes('context')) {
-                             console.warn(`[WATCHDOG] ⚠️ Detached frame detected pada ${chat.id.user}. Retrying (${retries}/2)...`);
-                             await new Promise(r => setTimeout(r, 2000));
+                            console.warn(`[WATCHDOG] ⚠️ Detached frame detected pada ${chat.id.user}. Retrying (${retries}/2)...`);
+                            await new Promise(r => setTimeout(r, 2000));
                         } else {
-                             console.error(`[BACKGROUND-RESYNC ERROR] Chat ${chat.id.user}:`, chatErr.message);
-                             break; // Keluar dari loop retry untuk error lain
+                            console.error(`[BACKGROUND-RESYNC ERROR] Chat ${chat.id.user}:`, chatErr.message);
+                            break; // Keluar dari loop retry untuk error lain
                         }
                     }
                 }
@@ -1049,9 +1121,9 @@ function verifySessionIntegrity() {
 
     // Cek file-file kritis untuk session yang valid
     const criticalPaths = [
-        { path: path.join(defaultPath, 'Local Storage'),   name: 'Local Storage' },
-        { path: path.join(defaultPath, 'IndexedDB'),       name: 'IndexedDB' },
-        { path: path.join(defaultPath, 'Service Worker'),  name: 'Service Worker' },
+        { path: path.join(defaultPath, 'Local Storage'), name: 'Local Storage' },
+        { path: path.join(defaultPath, 'IndexedDB'), name: 'IndexedDB' },
+        { path: path.join(defaultPath, 'Service Worker'), name: 'Service Worker' },
     ];
 
     let healthyCount = 0;
@@ -1081,7 +1153,7 @@ function verifySessionIntegrity() {
         const sessionStatus = verifySessionIntegrity();
 
         console.log('[SYSTEM] 🚀 Memulai inisialisasi WA Engine v3...');
-        
+
         // [v3] Timer 7 menit (dari 3 menit). VPS yang sibuk butuh waktu lebih lama.
         // 3 menit terlalu agresif → timeout saat VPS high load → restart → QR lagi.
         const INIT_TIMEOUT_MS = 7 * 60 * 1000;
@@ -1112,7 +1184,7 @@ app.get('/api/health', (req, res) => {
 app.get('/api/wa/status', (req, res) => {
     res.json({
         connected: isConnected,
-        qr: qrCodeData 
+        qr: qrCodeData
     });
 });
 
@@ -1163,13 +1235,13 @@ app.get('/api/wa/session-health', (req, res) => {
 app.post('/api/wa/send', async (req, res) => {
     const { phone_number, message, customer_id } = req.body;
     if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
-    
+
     try {
         const chatId = phone_number + '@c.us';
         // [FIX] Timeout ditingkatkan 30s → 45s dan DIBUNGKUS chromeSemaphore agar tidak hang
         await withTimeout(
-            chromeSemaphore.acquire('API:sendMessage', () => client.sendMessage(chatId, message), { priority: 1, timeout: 45000 }), 
-            45000, 
+            chromeSemaphore.acquire('API:sendMessage', () => client.sendMessage(chatId, message), { priority: 1, timeout: 45000 }),
+            45000,
             'sendMessage_API'
         );
 
@@ -1221,22 +1293,23 @@ app.post('/api/wa/resync', async (req, res) => {
             }
 
             const chatId = phone_number + '@c.us';
-            // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
-            const chat = await chromeSemaphore.acquire('API:resync_getChat', () => {
-                return withTimeout(client.getChatById(chatId), 20000, 'getChatById_resync');
-            }, { priority: 2, timeout: 30000 });
+            const chat = await withTimeout(
+                chromeSemaphore.acquire('API:resync_getChat', () => client.getChatById(chatId), { priority: 2, timeout: 30000 }),
+                30000,
+                'getChatById_resync'
+            );
 
             console.log(`[RESYNC] 🔍 Menyisir ulang history: ${phone_number}`);
-            
-            // [CRITICAL FIX] withTimeout harus DI DALAM acquire!
-            const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                return withTimeout(chat.fetchMessages({ limit: 1000 }), 120000, 'fetchMessages_resync');
-            }, { priority: 2, timeout: 150000 });
+            const historyMessages = await withTimeout(
+                chromeSemaphore.acquire('API:resync_fetchMsg', () => chat.fetchMessages({ limit: 500 }), { priority: 2, timeout: 120000 }),
+                120000,
+                'fetchMessages_resync'
+            );
 
             let count = 0;
             for (const msg of historyMessages) {
-                // isPriority=true: masuk antrian paling depan
-                await processMessageCommand(msg, true, true);
+                // isPriority=false: jangan menghalangi chat realtime yang masuk
+                await processMessageCommand(msg, true, false);
                 count++;
             }
 
@@ -1251,7 +1324,7 @@ app.post('/api/wa/resync', async (req, res) => {
 app.post('/api/wa/delete-chats', async (req, res) => {
     // API ini berjalan MURNI mengelola manipulasi File & Database (tidak perlu mengecek isConnected WA).
     const { customer_ids } = req.body;
-    
+
     if (!Array.isArray(customer_ids) || customer_ids.length === 0) {
         return res.status(400).json({ error: 'Tidak ada ID Pelanggan yang dituju.' });
     }
@@ -1261,32 +1334,32 @@ app.post('/api/wa/delete-chats', async (req, res) => {
         let successfullyDeleted = 0;
 
         for (const customerId of customer_ids) {
-             try {
-                 // FASE 1: Hapus media dari Object Storage/Disk (Zero Leakage)
-                 const { data: custMedia } = await supabase
-                     .from('media')
-                     .select('id, file_name, storage_key, storage_type')
-                     .eq('customer_id', customerId);
-                 if (custMedia && custMedia.length > 0) {
-                     for (const m of custMedia) {
-                         const sType = m.storage_type || 'local';
-                         const sKey  = m.storage_key  || m.file_name;
-                         await objectStorage.deleteMedia(sKey, sType).catch(() => {});
-                     }
-                 }
+            try {
+                // FASE 1: Hapus media dari Object Storage/Disk (Zero Leakage)
+                const { data: custMedia } = await supabase
+                    .from('media')
+                    .select('id, file_name, storage_key, storage_type')
+                    .eq('customer_id', customerId);
+                if (custMedia && custMedia.length > 0) {
+                    for (const m of custMedia) {
+                        const sType = m.storage_type || 'local';
+                        const sKey = m.storage_key || m.file_name;
+                        await objectStorage.deleteMedia(sKey, sType).catch(() => { });
+                    }
+                }
 
-                 // FASE 2: Evakuasi Tabel Turunan
-                 await supabase.from('media').delete().eq('customer_id', customerId);
-                 await supabase.from('messages').delete().eq('customer_id', customerId);
+                // FASE 2: Evakuasi Tabel Turunan
+                await supabase.from('media').delete().eq('customer_id', customerId);
+                await supabase.from('messages').delete().eq('customer_id', customerId);
 
-                 // FASE 3: Cabut Akar Utama
-                 await supabase.from('customers').delete().eq('id', customerId);
-                 
-                 successfullyDeleted++;
-             } catch (isolatedErr) {
-                 // Mencegah PM2 Crash: Error penghapusan 1 orang, tidak akan membatalkan yang lain
-                 console.error(`⚠️ [FAIL-SAFE] Skip penghapusan customer ${customerId} akibat error:`, isolatedErr.message);
-             }
+                // FASE 3: Cabut Akar Utama
+                await supabase.from('customers').delete().eq('id', customerId);
+
+                successfullyDeleted++;
+            } catch (isolatedErr) {
+                // Mencegah PM2 Crash: Error penghapusan 1 orang, tidak akan membatalkan yang lain
+                console.error(`⚠️ [FAIL-SAFE] Skip penghapusan customer ${customerId} akibat error:`, isolatedErr.message);
+            }
         }
 
         console.log(`✅ [DELETE-CHATS] Operasi tuntas. Menghapus penuh ${successfullyDeleted} pelanggan.`);
