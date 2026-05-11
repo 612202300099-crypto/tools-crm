@@ -1366,22 +1366,90 @@ app.post('/api/wa/resync', async (req, res) => {
                 emitProgress('resync_progress', { phone_number, message: `Mengambil riwayat dari ${targetChatId}...` });
                 
                 try {
-                    // [CRITICAL FIX] withTimeout harus DI DALAM acquire agar slot dilepas saat timeout!
                     const chat = await chromeSemaphore.acquire('API:resync_getChat', () => {
                         return withTimeout(client.getChatById(targetChatId), 30000, 'getChatById_resync');
                     }, { priority: 2, timeout: 40000 });
 
-                    const historyMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                        // Limit 3000 = jangkau pesan dari beberapa hari yang lalu
-                        return withTimeout(chat.fetchMessages({ limit: 3000 }), 300000, 'fetchMessages_resync');
-                    }, { priority: 2, timeout: 350000 });
+                    // ═══════════════════════════════════════════════════════════════
+                    // [UPGRADE GALI ULANG v4] DEEP PAGINATION via loadEarlierMessages
+                    // ═══════════════════════════════════════════════════════════════
+                    // fetchMessages({ limit: 3000 }) hanya membaca pesan yang SUDAH ADA
+                    // di RAM browser. Untuk chat dengan 400+ foto, mayoritas pesan lama
+                    // tidak ada di RAM → fetchMessages hanya mengembalikan ~50 pesan terbaru.
+                    //
+                    // Solusi: Panggil loadEarlierMessages() secara LOOP seperti "scroll ke atas"
+                    // di WhatsApp Web — memaksa browser memuat semua halaman riwayat dari server WA.
+                    // ═══════════════════════════════════════════════════════════════
+                    emitProgress('resync_progress', { phone_number, message: `Memuat riwayat penuh dari ${targetChatId} (metode pagination)... Mohon tunggu.` });
 
-                    const mediaInBatch = historyMessages.filter(m => m.hasMedia && !m.fromMe).length;
-                    console.log(`[RESYNC] 📊 ${historyMessages.length} pesan ditemukan (${mediaInBatch} foto/video dari customer) di ${targetChatId}`);
-                    emitProgress('resync_progress', { phone_number, message: `${historyMessages.length} pesan ditemukan (${mediaInBatch} foto/video dari customer). Memproses...` });
+                    // Step 1: Muat awal
+                    let allMessages = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
+                        return withTimeout(chat.fetchMessages({ limit: 100 }), 60000, 'fetchMessages_initial');
+                    }, { priority: 2, timeout: 90000 });
 
-                    // [SUPER OPTIMASI] Build cached context SEBELUM loop. 
-                    // Daripada memanggil chat.getContact() ratusan kali dan bikin Chrome hang!
+                    let totalLoaded = allMessages.length;
+                    let prevCount = 0;
+                    let loadIterations = 0;
+                    const MAX_ITERATIONS = 50; // Maks 50x scroll ke atas = sampai 5000+ pesan
+                    const TARGET_MEDIA = 500; // Target: muat sampai 500 foto/media ditemukan
+
+                    console.log(`[RESYNC] 📜 Awal: ${totalLoaded} pesan. Mulai paginasi mendalam...`);
+
+                    // Step 2: Loop "scroll ke atas" — muat pesan lebih lama
+                    while (loadIterations < MAX_ITERATIONS) {
+                        loadIterations++;
+                        prevCount = totalLoaded;
+
+                        try {
+                            // loadEarlierMessages = setara scroll ke atas di WA Web
+                            // Memuat 50 pesan lebih lama dari pesan tertua yang ada di memori
+                            const hasMore = await chromeSemaphore.acquire('API:resync_loadEarlier', () => {
+                                return withTimeout(chat.loadEarlierMessages(), 30000, 'loadEarlierMessages');
+                            }, { priority: 2, timeout: 45000 });
+
+                            // Ambil ulang semua pesan setelah load lebih banyak
+                            const refreshed = await chromeSemaphore.acquire('API:resync_fetchAfterLoad', () => {
+                                return withTimeout(chat.fetchMessages({ limit: 5000 }), 120000, 'fetchMessages_refresh');
+                            }, { priority: 2, timeout: 150000 });
+
+                            totalLoaded = refreshed.length;
+                            const newFound = totalLoaded - prevCount;
+                            const mediaFoundSoFar = refreshed.filter(m => m.hasMedia && !m.fromMe).length;
+
+                            console.log(`[RESYNC] 📜 Iterasi ${loadIterations}: ${totalLoaded} pesan total (+${newFound} baru) | ${mediaFoundSoFar} foto customer`);
+
+                            if (newFound > 0) {
+                                allMessages = refreshed; // Update dengan hasil terbaru
+                            }
+
+                            emitProgress('resync_progress', { phone_number, message: `Iterasi ${loadIterations}: ${totalLoaded} pesan dimuat, ${mediaFoundSoFar} foto customer ditemukan...` });
+
+                            // Berhenti jika tidak ada pesan baru (sudah di ujung riwayat)
+                            if (!hasMore || newFound === 0) {
+                                console.log(`[RESYNC] ✅ Paginasi selesai: semua riwayat sudah dimuat (${totalLoaded} pesan total).`);
+                                break;
+                            }
+
+                            // Berhenti jika sudah cukup banyak media ditemukan
+                            if (mediaFoundSoFar >= TARGET_MEDIA) {
+                                console.log(`[RESYNC] ✅ Target ${TARGET_MEDIA} media tercapai. Berhenti paginasi.`);
+                                break;
+                            }
+
+                            // Jeda singkat agar Chrome tidak kewalahan
+                            await new Promise(r => setTimeout(r, 800));
+
+                        } catch (loadErr) {
+                            console.warn(`[RESYNC] ⚠️ loadEarlierMessages gagal di iterasi ${loadIterations}:`, loadErr.message);
+                            break;
+                        }
+                    }
+
+                    const mediaInBatch = allMessages.filter(m => m.hasMedia && !m.fromMe).length;
+                    console.log(`[RESYNC] 📊 FINAL: ${allMessages.length} pesan (${mediaInBatch} foto/video dari customer) di ${targetChatId}`);
+                    emitProgress('resync_progress', { phone_number, message: `✅ Paginasi selesai! ${allMessages.length} pesan ditemukan (${mediaInBatch} foto dari customer). Memproses ke antrean...` });
+
+                    // Build cached context SEKALI saja sebelum loop pemrosesan
                     let cachedContext = null;
                     try {
                         let resolvedPhone = chat.id.user;
@@ -1404,7 +1472,7 @@ app.post('/api/wa/resync', async (req, res) => {
                             contactPushname: pushname,
                             isLidNetwork: lidNet
                         };
-                        console.log(`[RESYNC] ⚡ Cached Context berhasil dibuat untuk: ${resolvedPhone}`);
+                        console.log(`[RESYNC] ⚡ Cached Context: ${resolvedPhone} (LID: ${lidNet})`);
                     } catch (e) {
                         console.log(`[RESYNC] ⚠️ Gagal build cached context: ${e.message}`);
                     }
