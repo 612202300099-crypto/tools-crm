@@ -40,6 +40,7 @@ function getS3() {
         const { S3Client }         = require('@aws-sdk/client-s3');
         const { PutObjectCommand,
                 DeleteObjectCommand,
+                GetObjectCommand,
                 HeadBucketCommand  } = require('@aws-sdk/client-s3');
 
         const endpoint   = process.env.OBJECT_STORAGE_ENDPOINT;
@@ -64,7 +65,7 @@ function getS3() {
             forcePathStyle: false, // true hanya untuk MinIO self-hosted
         });
 
-        _s3Commands = { PutObjectCommand, DeleteObjectCommand, HeadBucketCommand };
+        _s3Commands = { PutObjectCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand };
         console.log(`[OBJ-STORAGE] ✅ S3 Client berhasil dibuat. Endpoint: ${endpoint}`);
         return { client: _s3Client, cmds: _s3Commands };
 
@@ -222,6 +223,54 @@ async function deleteMedia(storageKey, storageType = 'object') {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FUNGSI UTAMA: Ambil file dari Object Storage sebagai Buffer (Jalur Dalam / Anti 403)
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * Ambil file buffer dari S3 (via SDK) atau disk lokal.
+ * Mencegah error HTTP 403 Forbidden dari URL publik.
+ * 
+ * @param {string} storageKey  - Key/path file di bucket
+ * @param {string} storageType - 'object' atau 'local'
+ * @returns {Promise<Buffer>}
+ */
+async function getMediaBuffer(storageKey, storageType = 'object') {
+    if (!storageKey) throw new Error('storageKey kosong');
+
+    if (storageType === 'local') {
+        const filePath = path.join(__dirname, '..', 'uploads', storageKey);
+        if (!fs.existsSync(filePath)) throw new Error(`File lokal tidak ditemukan: ${filePath}`);
+        return fs.readFileSync(filePath);
+    }
+
+    // Ambil via S3 Client (Aman, butuh kredensial valid)
+    const s3 = getS3();
+    const bucket = process.env.OBJECT_STORAGE_BUCKET;
+
+    if (!s3 || !bucket) {
+        throw new Error('S3 Client tidak tersedia untuk download media');
+    }
+
+    try {
+        const command = new s3.cmds.GetObjectCommand({
+            Bucket: bucket,
+            Key: storageKey,
+        });
+
+        const response = await s3.client.send(command);
+        
+        // Konversi stream AWS ke Buffer
+        return new Promise((resolve, reject) => {
+            const chunks = [];
+            response.Body.on('data', (chunk) => chunks.push(chunk));
+            response.Body.on('error', reject);
+            response.Body.on('end', () => resolve(Buffer.concat(chunks)));
+        });
+    } catch (err) {
+        throw new Error(`Gagal download buffer S3 (${storageKey}): ${err.message}`);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Startup Health Check — dipanggil saat server start
 // ─────────────────────────────────────────────────────────────────────────────
 async function healthCheck() {
@@ -240,6 +289,7 @@ async function healthCheck() {
 module.exports = {
     uploadMedia,
     deleteMedia,
+    getMediaBuffer,
     saveToLocalDisk,
     isObjectStorageAvailable,
     resetAvailabilityCache,

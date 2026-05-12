@@ -563,16 +563,19 @@ async function processUploadQueue() {
         }
     }
 
-    console.log(`[DRIVE] 🔄 Memproses ${pendingItems.length} upload ke Google Drive...`);
+    console.log(`[DRIVE] 🔄 Memproses ${pendingItems.length} upload ke Google Drive (Multi-Worker)...`);
 
-    for (const item of pendingItems) {
+    const MAX_WORKERS = 5;
+    let index = 0;
+
+    const processItem = async (item) => {
         // [FIX] Polaroid: lewati foto berlebih (lebih dari required_photos)
         const photoStats = customerPhotoMap[item.customer_id];
         if (photoStats && photoStats.limit > 0 && photoStats.uploaded >= photoStats.limit) {
             // Tandai sebagai SKIPPED (jangan upload foto berlebih)
             db.prepare(`UPDATE drive_upload_queue SET status = 'SKIPPED' WHERE id = ?`).run(item.id);
             console.warn(`[DRIVE] ⏭️ [${item.id}] SKIP foto berlebih: customer ${item.customer_id} sudah ${photoStats.uploaded}/${photoStats.limit}`);
-            continue;
+            return;
         }
 
         try {
@@ -580,21 +583,20 @@ async function processUploadQueue() {
             db.prepare(`UPDATE drive_upload_queue SET status = 'UPLOADING' WHERE id = ?`).run(item.id);
 
             // 1. Download file dari Object Storage / local disk
-            console.log(`[DRIVE] ⬇️ [${item.id}] Download: ${item.storage_type} | ${(item.storage_key || item.file_url).split('/').pop()}`);
+            const fileNameLog = (item.storage_key || item.file_url || 'unknown').split('/').pop();
+            console.log(`[DRIVE] ⬇️ [${item.id}] Download: ${item.storage_type} | ${fileNameLog}`);
             let buffer;
-            if (item.storage_type === 'object' && item.file_url) {
-                // Download dari Object Storage via public URL
-                const response = await fetch(item.file_url, {
-                    signal: AbortSignal.timeout(60000),
-                });
-                if (!response.ok) throw new Error(`HTTP ${response.status} download gagal: ${item.file_url}`);
-                const arrayBuf = await response.arrayBuffer();
-                buffer = Buffer.from(arrayBuf);
-                console.log(`[DRIVE] ✅ [${item.id}] Download OK: ${Math.round(buffer.length / 1024)}KB`);
+            
+            if (item.storage_type === 'object') {
+                // [FIX 403] Ambil buffer langsung via S3 Client (Internal)
+                const objectStorage = require('./object_storage_service');
+                const storageKey = item.storage_key || (item.file_url ? item.file_url.split('/').pop() : null);
+                if (!storageKey) throw new Error('storageKey dan file_url kosong');
+                
+                buffer = await objectStorage.getMediaBuffer(storageKey, 'object');
+                console.log(`[DRIVE] ✅ [${item.id}] Download S3 OK: ${Math.round(buffer.length / 1024)}KB`);
             } else {
                 // Baca dari disk lokal
-                // file_url bisa berupa: https://api.kirimfoto.com/uploads/xxx/foto.jpg
-                // atau path relatif: uploads/xxx/foto.jpg
                 let localPath;
                 const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
                 if (item.file_url && item.file_url.startsWith(publicUrl)) {
@@ -604,7 +606,7 @@ async function processUploadQueue() {
                 } else if (item.file_name) {
                     localPath = path.join(__dirname, '..', 'uploads', item.file_name);
                 } else {
-                    localPath = path.join(__dirname, '..', 'uploads', item.file_url);
+                    localPath = path.join(__dirname, '..', 'uploads', item.file_url || item.storage_key);
                 }
                 if (!fs.existsSync(localPath)) {
                     throw new Error(`File lokal tidak ditemukan: ${localPath}`);
@@ -623,7 +625,7 @@ async function processUploadQueue() {
             );
             console.log(`[DRIVE] ✅ [${item.id}] Folder OK: ${folderId}`);
 
-            await sleep(500);
+            await sleep(500); // Jeda rate limit API Google
 
             // 3. Upload file ke Drive
             // [FIX] Nama file informatif: {phone}_{urutan}.jpg bukan foto-randomhex.jpg
@@ -658,29 +660,48 @@ async function processUploadQueue() {
         } catch (err) {
             // Handle errors with retry logic
             const retryCount = (item.retry_count || 0) + 1;
-            const isRateLimit = err.message && (err.message.includes('429') || err.message.includes('Rate Limit'));
+            const msg = err.message || '';
+            const isRateLimit = msg.includes('429') || msg.includes('Rate Limit') || msg.includes('User Rate Limit');
 
             if (isRateLimit) {
-                console.warn(`[DRIVE] ⏳ Rate limit! Pause 60 detik...`);
-                await sleep(60000);
+                console.warn(`[DRIVE] ⏳ [${item.id}] Rate limit Google! Pause 30 detik...`);
+                await sleep(30000); // Tunggu lebih lama jika kena rate limit
             }
 
             db.prepare(`
                 UPDATE drive_upload_queue
                 SET status = 'PENDING', retry_count = ?, error_msg = ?
                 WHERE id = ?
-            `).run(retryCount, err.message.substring(0, 200), item.id);
+            `).run(retryCount, msg.substring(0, 200), item.id);
 
             if (retryCount >= (item.max_retries || 5)) {
                 db.prepare(`UPDATE drive_upload_queue SET status = 'FAILED' WHERE id = ?`).run(item.id);
-                console.error(`[DRIVE] ❌ Gagal setelah ${retryCount}x: ${item.file_url} — ${err.message}`);
+                console.error(`[DRIVE] ❌ Gagal setelah ${retryCount}x [${item.id}]: ${msg}`);
             } else {
-                console.warn(`[DRIVE] 🔄 Retry ${retryCount}/${item.max_retries}: ${err.message.substring(0, 80)}`);
+                console.warn(`[DRIVE] 🔄 Retry ${retryCount}/${item.max_retries} [${item.id}]: ${msg.substring(0, 80)}`);
             }
         }
+    };
+
+    // 5. Worker Pool Executor
+    const worker = async () => {
+        while (index < pendingItems.length) {
+            const currentIndex = index++;
+            const item = pendingItems[currentIndex];
+            await processItem(item);
+        }
+    };
+
+    const workers = [];
+    // Batasi jumlah worker agar tidak melebihi jumlah item
+    const numWorkers = Math.min(MAX_WORKERS, pendingItems.length);
+    for (let i = 0; i < numWorkers; i++) {
+        workers.push(worker());
     }
 
-    console.log('[DRIVE] ✅ Batch selesai.');
+    await Promise.all(workers);
+
+    console.log('[DRIVE] ✅ Batch parallel selesai.');
     } finally {
         isProcessingQueue = false;
     }
