@@ -173,9 +173,9 @@ async function runCleanup(forceTier2 = false) {
 
         // ═══════════════════════════════════════════════════════════
         // TIER 1: VALIDATED atau SUDAH_KIRIM_FOTO → hapus foto
-        // Normal mode: >3 hari | Crisis mode (disk>90%): >1 hari
+        // Normal mode: >7 hari | Crisis mode (disk>90%): >5 hari
         // ═══════════════════════════════════════════════════════════
-        const tier1Days = (diskBefore >= 90) ? 1 : 3;
+        const tier1Days = (diskBefore >= 90) ? 5 : 7;
         const tier1Cutoff = new Date();
         tier1Cutoff.setDate(tier1Cutoff.getDate() - tier1Days);
 
@@ -199,9 +199,9 @@ async function runCleanup(forceTier2 = false) {
 
         // ═══════════════════════════════════════════════════════════
         // TIER 2: BELUM_KIRIM_FOTO abandoned
-        // Normal mode: >7 hari | Crisis mode (disk>90%): >2 hari
+        // Normal mode: >14 hari | Crisis mode (disk>90%): >7 hari
         // ═══════════════════════════════════════════════════════════
-        const tier2Days = (diskBefore >= 90) ? 2 : 7;
+        const tier2Days = (diskBefore >= 90) ? 7 : 14;
         const tier2Cutoff = new Date();
         tier2Cutoff.setDate(tier2Cutoff.getDate() - tier2Days);
 
