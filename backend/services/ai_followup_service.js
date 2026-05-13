@@ -778,11 +778,31 @@ async function checkAndRespond(waClient, customer, message, supabase) {
     }
 }
 
+// ─── Memori Debounce untuk mencegah SPAM saat foto masuk bertubi-tubi ────────
+const _photoCheckTimers = new Map();
+
 // ─── FUNGSI PUBLIK: Dipanggil dari index.js setiap ada MEDIA masuk ───────────
 async function checkAndRespondMedia(waClient, customer, supabase) {
-    // Tunggu sebentar agar DB sempat menyimpan media sebelum kita hitung
-    await sleep(3000);
-    await handleMediaPhotoCheck(waClient, customer, supabase);
+    const customerId = customer.id;
+
+    // Batalkan timer sebelumnya jika ada foto baru masuk dalam rentang waktu tunggu
+    if (_photoCheckTimers.has(customerId)) {
+        clearTimeout(_photoCheckTimers.get(customerId));
+    }
+
+    // Setel timer baru selama 3 menit (180.000 ms)
+    // Bot hanya akan menghitung dan membalas jika tidak ada foto baru selama 3 menit
+    const timer = setTimeout(async () => {
+        _photoCheckTimers.delete(customerId);
+        try {
+            await handleMediaPhotoCheck(waClient, customer, supabase);
+        } catch (err) {
+            console.error(`[AI-BOT] ⚠️ Error di handleMediaPhotoCheck (Debounced) untuk ${customer.phone_number}:`, err.message);
+        }
+    }, 3 * 60 * 1000); // 3 menit
+
+    _photoCheckTimers.set(customerId, timer);
+    console.log(`[AI-BOT] ⏳ Menunggu 3 menit untuk menghitung total foto dari ${customer.phone_number}...`);
 }
 
 // ─── Fungsi lama dipertahankan agar tidak ada yang broken ────────────────────
