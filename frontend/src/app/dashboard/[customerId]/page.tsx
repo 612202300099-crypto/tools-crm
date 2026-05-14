@@ -453,9 +453,12 @@ export default function ChatDetail() {
        alert('Tidak ada foto produksi untuk di-download. Foto nomor pesanan otomatis dikecualikan.');
        return;
     }
-    const estimasiDetik = Math.ceil(targetCount * 0.5);
+    const mediaParam = selectedMedia.size > 0 ? `&mediaIds=${productionIds.join(',')}` : '';
+    const downloadUrl = `${WA_API_URL}/api/local/customers/${customerId}/fast-zip?token=${token}${mediaParam}`;
+    window.location.href = downloadUrl;
+  };
 
-    setLoadingMedia(true);
+
     try {
         const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
         const mediaParam = selectedMedia.size > 0 ? `?mediaIds=${productionIds.join(',')}` : '';

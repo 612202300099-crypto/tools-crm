@@ -18,8 +18,9 @@ if (!process.env.JWT_SECRET || !process.env.ADMIN_PASSWORD || !process.env.ADMIN
 
 // Middleware Auth
 const authenticateToken = (req, res, next) => {
+    // [FIX] Support token via query parameter for large file downloads (ZIP)
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = (authHeader && authHeader.split(' ')[1]) || req.query.token;
     
     if (token == null) return res.sendStatus(401);
 
@@ -300,7 +301,7 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
         res.setHeader('Transfer-Encoding', 'chunked');
 
         const archive = archiver('zip', {
-            zlib: { level: 1 }
+            zlib: { level: 1 } // Low compression = High speed
         });
 
         archive.on('error', (err) => {
@@ -311,56 +312,58 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
         // Pipe archive stream langsung ke response HTTP (Streaming)
         archive.pipe(res);
 
-        for (let i = 0; i < mediaList.length; i++) {
-            const media = mediaList[i];
-            const rawExt = (media.file_url || '').split('.').pop().split('?')[0];
-            const ext = ['jpg','jpeg','png','webp','heic','gif','mp4'].includes(rawExt?.toLowerCase()) ? rawExt : 'jpg';
-            const fileName = `foto_${String(i + 1).padStart(3, '0')}.${ext}`;
+        // [TURBO] Parallel Download Pool — Download 15 foto sekaligus
+        const MAX_CONCURRENT = 15;
+        let index = 0;
+        const objectStorage = require('./services/object_storage_service');
 
-            try {
-                if (media.storage_type === 'object' && media.file_url) {
-                    // Object Storage: stream dari URL dengan timeout 30 detik per file
-                    const fetchResponse = await fetch(media.file_url, {
-                        signal: AbortSignal.timeout(30000)
-                    });
-                    if (fetchResponse.ok) {
-                        const arrayBuffer = await fetchResponse.arrayBuffer();
-                        archive.append(Buffer.from(arrayBuffer), { name: fileName });
+        const worker = async () => {
+            while (index < mediaList.length) {
+                const i = index++;
+                const media = mediaList[i];
+                
+                const rawExt = (media.file_url || '').split('.').pop().split('?')[0];
+                const ext = ['jpg','jpeg','png','webp','heic','gif','mp4'].includes(rawExt?.toLowerCase()) ? rawExt : 'jpg';
+                const fileName = `foto_${String(i + 1).padStart(4, '0')}.${ext}`;
+
+                try {
+                    let buffer;
+                    if (media.storage_type === 'object') {
+                        // Jalur dalam (Direct S3 Buffer) — Anti 403 & Cepat
+                        const storageKey = media.storage_key || (media.file_url ? media.file_url.split('/').pop() : null);
+                        buffer = await objectStorage.getMediaBuffer(storageKey, 'object');
                     } else {
-                        console.warn(`[ZIP] Skip ${media.id}: HTTP ${fetchResponse.status}`);
-                    }
-                } else {
-                    // File lokal: baca dari disk
-                    const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
-                    let localPath = null;
-
-                    if (media.file_url && media.file_url.startsWith(publicUrl)) {
-                        const relativePath = media.file_url.replace(publicUrl, '').replace(/^\//, '');
-                        localPath = path.join(__dirname, relativePath);
-                    } else if (media.file_url && media.file_url.startsWith('/')) {
-                        localPath = path.join(__dirname, media.file_url);
-                    } else if (media.file_name) {
-                        localPath = path.join(__dirname, 'uploads', media.file_name);
-                    }
-
-                    if (localPath && fs.existsSync(localPath)) {
-                        archive.file(localPath, { name: fileName });
-                    } else {
-                        // Coba path alternatif
-                        const altPath = path.join(__dirname, 'uploads', media.file_name || '');
-                        if (fs.existsSync(altPath)) {
-                            archive.file(altPath, { name: fileName });
-                        } else {
-                            console.warn(`[ZIP] Skip ${media.id}: file tidak ditemukan di ${localPath}`);
+                        // Jalur lokal
+                        let localPath = null;
+                        const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
+                        if (media.file_url && media.file_url.startsWith(publicUrl)) {
+                            const relativePath = media.file_url.replace(publicUrl, '').replace(/^\//, '');
+                            localPath = path.join(__dirname, relativePath);
+                        } else if (media.file_name) {
+                            localPath = path.join(__dirname, 'uploads', media.file_name);
+                        }
+                        
+                        if (localPath && fs.existsSync(localPath)) {
+                            buffer = fs.readFileSync(localPath);
                         }
                     }
+
+                    if (buffer) {
+                        archive.append(buffer, { name: fileName });
+                    }
+                } catch (err) {
+                    console.error(`[ZIP] Gagal ambil file ${media.id}:`, err.message);
                 }
-            } catch (err) {
-                console.error(`[API] Gagal zip file ${media.id}:`, err.message);
-                // Lanjut ke file berikutnya — jangan batalkan seluruh ZIP
             }
+        };
+
+        // Jalankan pool workers
+        const workers = [];
+        for (let i = 0; i < Math.min(MAX_CONCURRENT, mediaList.length); i++) {
+            workers.push(worker());
         }
 
+        await Promise.all(workers);
         await archive.finalize();
         console.log(`[ZIP] ✅ Berhasil buat ZIP ${zipFilename} (${mediaList.length} foto)`);
 
