@@ -24,6 +24,7 @@ const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidate
 const { router: localApiRouter, authenticateToken } = require('./api');
 const db = require('./db');
 const { lookupOrder } = require('./services/spreadsheet_service');
+const { detectOrderId } = require('./utils/orderIdUtils'); // [BUG FIX] Regex order ID terpusat (14-20 digit)
 
 // [BEST PRACTICE] Global Error Catcher — Server Tidak Pernah Mati
 // Mencegah server Node.js crash karena error yang tidak tertangkap.
@@ -234,9 +235,9 @@ app.post('/api/local/emergency-mass-sync', authenticateToken, async (req, res) =
 
                                     // [CRITICAL PINTAR] Baca Nomor Order dari pesan pelanggan yang baru digali!
                                     if (!msg.fromMe && !c.order_id) {
-                                        const orderIdMatch = msg.body.match(/\b\d{10,20}\b/);
-                                        if (orderIdMatch) {
-                                            const foundOrderId = orderIdMatch[0];
+                                        // [BUG FIX] Gunakan detectOrderId (14-20 digit) — bukan 10-20 yang bisa tangkap nomor HP!
+                                        const foundOrderId = detectOrderId(msg.body);
+                                        if (foundOrderId) {
                                             console.log(`[EMERGENCY] 🔎 Ditemukan No Order dari chat lama: ${foundOrderId}`);
                                             db.prepare('UPDATE customers SET order_id = ? WHERE id = ?').run(foundOrderId, c.id);
                                             c.order_id = foundOrderId;
@@ -1647,6 +1648,63 @@ app.post('/api/wa/resync', async (req, res) => {
                 console.warn(`[RESYNC] ⚠️ Healing pass gagal:`, healingErr.message);
             }
 
+
+            // ═══════════════════════════════════════════════════════════════════
+            // [F1-BUG4] POST-RESYNC ORDER DETECTION PASS
+            // Scan semua pesan text yang sudah disimpan ke DB — cari nomor pesanan
+            // yang tidak terdeteksi sebelumnya (karena skipCustomerUpdate=true saat resync).
+            // ═══════════════════════════════════════════════════════════════════
+            if (customer_id) {
+                try {
+                    const freshCustomer = db.prepare('SELECT * FROM customers WHERE id = ?').get(customer_id);
+                    if (freshCustomer && !freshCustomer.order_id) {
+                        // Ambil semua pesan teks customer dari DB
+                        const savedMessages = db.prepare(
+                            `SELECT body FROM messages WHERE customer_id = ? AND is_from_me = 0 ORDER BY created_at ASC`
+                        ).all(customer_id);
+
+                        let foundOrderInOldMessages = null;
+                        for (const msgRow of savedMessages) {
+                            const foundId = detectOrderId(msgRow.body);
+                            if (foundId) {
+                                foundOrderInOldMessages = foundId;
+                                break; // Gunakan yang pertama ditemukan
+                            }
+                        }
+
+                        if (foundOrderInOldMessages) {
+                            console.log(`[RESYNC] 🔎 Post-resync: Ditemukan order ID dari pesan lama: ${foundOrderInOldMessages}`);
+                            emitProgress('resync_progress', { phone_number, message: `🔎 Nomor pesanan ditemukan di pesan lama: ${foundOrderInOldMessages}` });
+
+                            db.prepare('UPDATE customers SET order_id = ? WHERE id = ?').run(foundOrderInOldMessages, customer_id);
+
+                            // Langsung lookup di spreadsheet
+                            try {
+                                const lookup = await lookupOrder(foundOrderInOldMessages, { bypassCache: true });
+                                if (lookup && lookup.found && !lookup.cancelled) {
+                                    db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
+                                        .run(lookup.resi, lookup.storeName, JSON.stringify(lookup.items), customer_id);
+
+                                    // Lepas foto yang WAITING_RESI ke PENDING
+                                    db.prepare(`
+                                        UPDATE drive_upload_queue
+                                        SET status = 'PENDING', resi = ?, store_name = ?, updated_at = datetime('now')
+                                        WHERE customer_id = ? AND status = 'WAITING_RESI'
+                                    `).run(lookup.resi, lookup.storeName, customer_id);
+
+                                    emitProgress('resync_progress', { phone_number, message: `✅ Pesanan terhubung: ${lookup.storeName} | Resi: ${lookup.resi}` });
+                                    console.log(`[RESYNC] ✅ Post-resync order lookup sukses: ${lookup.storeName} | ${lookup.resi}`);
+                                }
+                            } catch (lookupErr) {
+                                console.warn('[RESYNC] ⚠️ Post-resync lookup gagal:', lookupErr.message);
+                            }
+                        }
+                    }
+                } catch (orderDetectErr) {
+                    console.warn('[RESYNC] ⚠️ Post-resync order detection gagal:', orderDetectErr.message);
+                }
+            }
+
             const summary = `Gali Ulang selesai! ${totalPesanDiproses} pesan diproses, ${totalMediaDitemukan} foto/video ditemukan dan dimasukkan ke antrean download.`;
             console.log(`[RESYNC] 🏆 ${summary}`);
             emitProgress('resync_done', { 
@@ -2078,13 +2136,68 @@ server.listen(PORT, '0.0.0.0', () => {
     // PESANAN → TOKO → PRODUK → RESI_SKU → foto.jpg
     const driveService = require('./services/google_drive_service');
     setInterval(async () => {
-        if (!isConnected) return;
+        // [BUG FIX F1-BUG1] Drive upload TIDAK butuh WA connected — pakai Google API!
         try {
             await driveService.processUploadQueue();
         } catch (e) {
             console.error('[CRON] Drive upload error:', e.message);
         }
-    }, 30000); // Setiap 30 detik
+    }, 30000); // Setiap 30 detik — tidak perlu WA konek
     const driveStatus = driveService.getDrive() ? '🟢 AKTIF' : '🔴 TIDAK AKTIF (cek .env + service-account.json)';
-    console.log(`☁️ Google Drive Upload: ${driveStatus} — proses antrian setiap 30 detik.`);
+    console.log(`☁️ Google Drive Upload: ${driveStatus} — proses antrian setiap 30 detik (tidak perlu WA konek).`);
+
+    // ── AUTO-SWEEP: Setiap 4 jam, sweep chat aktif 24 jam terakhir ──────
+    // [ROADMAP F2-FEAT1] Pengganti Startup Sync yang dinonaktifkan.
+    // AMAN: skipCustomerUpdate=true — tidak spam customer, priority rendah (3).
+    cron.schedule('0 */4 * * *', async () => {
+        if (!isConnected) {
+            console.log('[AUTO-SWEEP] ⏭️ WA belum konek — auto-sweep ditunda ke siklus berikutnya.');
+            return;
+        }
+        if (stability.isBusy()) {
+            console.log('[AUTO-SWEEP] ⏭️ Sistem BUSY — auto-sweep ditunda.');
+            return;
+        }
+        console.log('[AUTO-SWEEP] 🔄 Memulai auto-sweep chat aktif (24 jam terakhir)...');
+        try {
+            const chats = await chromeSemaphore.acquire('AUTO-SWEEP:getChats', () => {
+                return withTimeout(client.getChats(), 60000, 'getChats_autosweep');
+            }, { priority: 3, timeout: 90000 });
+
+            const cutoff24h = Math.floor(Date.now() / 1000) - (24 * 60 * 60);
+            const activeChats = chats.filter(c =>
+                !c.isGroup &&
+                c.id.user !== 'status' &&
+                c.id.user !== 'broadcast' &&
+                c.lastMessage &&
+                c.lastMessage.timestamp >= cutoff24h
+            );
+            console.log('[AUTO-SWEEP] 📋 ' + activeChats.length + ' chat aktif dalam 24 jam. Mulai menyisir...');
+
+            let sweepCount = 0;
+            let mediaCount = 0;
+            for (const chat of activeChats) {
+                try {
+                    const messages = await chromeSemaphore.acquire('AUTO-SWEEP:fetchMsg', () => {
+                        return withTimeout(chat.fetchMessages({ limit: 100 }), 45000, 'fetchMessages_autosweep');
+                    }, { priority: 3, timeout: 60000 });
+
+                    for (const msg of messages) {
+                        if (msg.timestamp >= cutoff24h && !msg.fromMe) {
+                            await processMessageCommand(msg, true, false); // skipCustomerUpdate=true, tidak spam
+                            if (msg.hasMedia) mediaCount++;
+                        }
+                    }
+                    sweepCount++;
+                    await sleep(800); // Jeda antar chat — beri Chrome waktu bernapas
+                } catch (err) {
+                    console.warn('[AUTO-SWEEP] ⚠️ Skip ' + chat.id.user + ': ' + err.message.substring(0, 60));
+                }
+            }
+            console.log('[AUTO-SWEEP] ✅ Selesai: ' + sweepCount + ' chat disapu, ' + mediaCount + ' media diproses.');
+        } catch (err) {
+            console.error('[AUTO-SWEEP] ❌ Error:', err.message);
+        }
+    });
+    console.log('🔄 Auto-Sweep aktif: setiap 4 jam, menyisir chat aktif 24 jam terakhir.');
 });

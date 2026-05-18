@@ -245,9 +245,11 @@ db.exec(`
 
 // [MIGRATION] Tambah kolom baru ke tabel lama yang sudah ada di VPS
 // Kolom photo_index dan customer_phone ditambahkan di v2 — safe migration
+// updated_at ditambahkan di v3 untuk healing pass yang lebih akurat
 const driveQueueMigrations = [
     { col: 'photo_index',    sql: `ALTER TABLE drive_upload_queue ADD COLUMN photo_index INTEGER DEFAULT 1` },
     { col: 'customer_phone', sql: `ALTER TABLE drive_upload_queue ADD COLUMN customer_phone TEXT` },
+    { col: 'updated_at',     sql: `ALTER TABLE drive_upload_queue ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))` },
 ];
 for (const m of driveQueueMigrations) {
     try {
@@ -262,5 +264,10 @@ for (const m of driveQueueMigrations) {
         console.warn(`[DB] ⚠️ Migration '${m.col}' skip:`, e.message);
     }
 }
+
+// [INDEX] Tambah index untuk updated_at agar healing query cepat
+try {
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_drive_queue_status_updated ON drive_upload_queue(status, updated_at)`);
+} catch (e) { /* index mungkin sudah ada */ }
 
 module.exports = db;

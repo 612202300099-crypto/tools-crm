@@ -403,9 +403,7 @@ export default function ChatDetail() {
             mediaIds: productionIds
         });
 
-        // apiClient otomatis throw error jika res.data tidak ada atau HTTP error
         const data = res.data;
-
         setSelectedMedia(new Set()); // Kosongkan seleksi
         
         let msg = `✅ Berhasil memasukkan ${data.pushed} foto ke antrean Google Drive!`;
@@ -415,17 +413,10 @@ export default function ChatDetail() {
         setScanResult({ type: 'success', message: msg });
     } catch (err: any) {
         const errMsg = err.response?.data?.error || err.message;
-        setScanResult({ type: 'error', message: `❌ ${errMsg}` });
+        setScanResult({ type: 'error', message: `❌ Gagal sinkron: ${errMsg}` });
     } finally {
         setIsSyncingDrive(false);
     }
-  };
-
-  const toggleMediaSelect = (id: string) => {
-    const next = new Set(selectedMedia);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setSelectedMedia(next);
   };
 
   const selectAllMedia = () => {
@@ -453,45 +444,14 @@ export default function ChatDetail() {
        alert('Tidak ada foto produksi untuk di-download. Foto nomor pesanan otomatis dikecualikan.');
        return;
     }
+
+    // [TURBO] Gunakan Native Download (Streaming) — Agar RAM browser tidak meledak saat download 1000+ foto
     const mediaParam = selectedMedia.size > 0 ? `&mediaIds=${productionIds.join(',')}` : '';
     const downloadUrl = `${WA_API_URL}/api/local/customers/${customerId}/fast-zip?token=${token}${mediaParam}`;
+    
+    // Trigger download langsung via browser (Native Stream)
     window.location.href = downloadUrl;
   };
-
-
-    try {
-        const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
-        const mediaParam = selectedMedia.size > 0 ? `?mediaIds=${productionIds.join(',')}` : '';
-        
-        // [FIX] Tidak pakai AbortSignal.timeout — ZIP 400 foto bisa makan 2-3 menit
-        // keepalive: true agar koneksi tidak putus saat tab di-background
-        const response = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/fast-zip${mediaParam}`, {
-            method: 'GET',
-            headers: {
-                'Authorization': `Bearer ${token}`
-            },
-            keepalive: true,
-        });
-
-        if (!response.ok) {
-            const err = await response.json().catch(() => ({}));
-            throw new Error(err.error || `Server error HTTP ${response.status}`);
-        }
-
-        const blob = await response.blob();
-        if (blob.size < 100) throw new Error('ZIP kosong — kemungkinan tidak ada foto yang berhasil dipack');
-        
-        saveAs(blob, `${orderName}.zip`);
-
-    } catch (error: any) {
-        console.error('[ZIP]', error);
-        alert(`Gagal membuat ZIP: ${error.message}\n\nTips: Coba Download Zip lagi — jika masih gagal, kurangi jumlah foto yang dipilih.`);
-    } finally {
-        setLoadingMedia(false);
-    }
-  };
-
-
 
   const sendQuickReply = async (templateText?: string) => {
     const textToSend = templateText || replyText;
@@ -499,7 +459,7 @@ export default function ChatDetail() {
     
     setIsSending(true);
     try {
-       const res = await fetch(`${WA_API_URL}/api/wa/send`, {
+        const res = await fetch(`${WA_API_URL}/api/wa/send`, {
            method: 'POST',
            headers: { 'Content-Type': 'application/json' },
            body: JSON.stringify({ 

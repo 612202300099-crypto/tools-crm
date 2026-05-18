@@ -104,9 +104,15 @@ router.get('/customers/:id', authenticateToken, (req, res) => {
     }
 });
 
-router.put('/customers/:id', authenticateToken, (req, res) => {
+router.put('/customers/:id', authenticateToken, async (req, res) => {
     try {
         const { name, order_id, status, is_valid, created_at } = req.body;
+        const customerId = req.params.id;
+
+        // Ambil data customer sebelum update untuk perbandingan
+        const existingCustomer = db.prepare('SELECT * FROM customers WHERE id = ?').get(customerId);
+        if (!existingCustomer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
+
         const updates = [];
         const params = [];
 
@@ -117,10 +123,43 @@ router.put('/customers/:id', authenticateToken, (req, res) => {
         if (created_at !== undefined) { updates.push('created_at = ?'); params.push(created_at); }
 
         if (updates.length > 0) {
-            params.push(req.params.id);
+            params.push(customerId);
             db.prepare(`UPDATE customers SET ${updates.join(', ')} WHERE id = ?`).run(...params);
         }
-        
+
+        // [F2-FEAT2] Auto Spreadsheet Lookup saat order_id diisi/diubah secara manual oleh admin.
+        // Jika ditemukan: update resi + store_name + order_detail, dan lepas WAITING_RESI di Drive queue.
+        const orderIdChanged = order_id !== undefined && order_id !== existingCustomer.order_id && order_id;
+        if (orderIdChanged) {
+            setImmediate(async () => {
+                try {
+                    console.log(`[API] 🔍 Auto-lookup spreadsheet untuk order_id baru: ${order_id} (customer: ${customerId})`);
+                    const result = await lookupOrder(order_id, { bypassCache: true });
+
+                    if (result && result.found && !result.cancelled) {
+                        const { resi, storeName: store_name, items } = result;
+                        db.prepare('UPDATE customers SET resi = ?, store_name = ?, order_detail = ? WHERE id = ?')
+                            .run(resi || null, store_name || null, JSON.stringify(items), customerId);
+
+                        // Lepas foto yang menunggu resi dari WAITING_RESI → PENDING
+                        const released = db.prepare(`
+                            UPDATE drive_upload_queue
+                            SET status = 'PENDING', resi = ?, store_name = ?, updated_at = datetime('now')
+                            WHERE customer_id = ? AND status = 'WAITING_RESI'
+                        `).run(resi || order_id, store_name || null, customerId);
+
+                        console.log(`[API] ✅ Auto-lookup sukses: ${store_name} | resi: ${resi} | ${released.changes} foto dilepas ke Drive queue.`);
+                    } else if (result && result.cancelled) {
+                        console.log(`[API] ❌ Order ${order_id} sudah DIBATALKAN di spreadsheet.`);
+                    } else {
+                        console.log(`[API] ⚠️ Order ${order_id} belum ada di spreadsheet. Pending order retry akan coba lagi.`);
+                    }
+                } catch (e) {
+                    console.warn('[API] ⚠️ Auto-lookup gagal (non-fatal):', e.message);
+                }
+            });
+        }
+
         res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -375,5 +414,76 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
     }
 });
 
+// ─── Drive Queue Stats ─────────────────────────────────────────────────────
+// [F4-OPT2] Real-time monitoring antrian upload Drive untuk admin dashboard.
+router.get('/drive-stats', authenticateToken, (req, res) => {
+    try {
+        const stats = db.prepare(`
+            SELECT
+                status,
+                COUNT(*) as count
+            FROM drive_upload_queue
+            GROUP BY status
+        `).all();
+
+        const result = {
+            PENDING: 0,
+            WAITING_RESI: 0,
+            UPLOADING: 0,
+            DONE: 0,
+            FAILED: 0,
+            total: 0,
+        };
+
+        for (const row of stats) {
+            if (result.hasOwnProperty(row.status)) {
+                result[row.status] = row.count;
+            }
+            result.total += row.count;
+        }
+
+        // Tambahkan info item terbaru yang FAILED untuk debugging
+        const recentFailed = db.prepare(`
+            SELECT customer_phone, error_msg, updated_at
+            FROM drive_upload_queue
+            WHERE status = 'FAILED'
+            ORDER BY COALESCE(updated_at, created_at) DESC
+            LIMIT 5
+        `).all();
+
+        res.json({ success: true, stats: result, recentFailed });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── Session Reset Endpoint ────────────────────────────────────────────────
+// [WA SESSION FIX] Endpoint untuk reset session WA (ganti nomor/nomor terblokir)
+// PENTING: Setelah dipanggil, sistem akan minta QR baru. Gunakan hanya jika benar-benar perlu.
+router.post('/wa/reset-session', authenticateToken, (req, res) => {
+    res.json({ success: true, message: 'Session reset dimulai. Server akan restart dan minta QR baru dalam ~30 detik.' });
+    console.log('[SESSION-RESET] 🚨 Admin meminta reset session WA. Menghapus session lama dan memicu restart...');
+    setImmediate(() => {
+        try {
+            const fs = require('fs');
+            const path = require('path');
+            // Hapus folder session WA (di-resolve dari root backend)
+            const sessionDir = path.join(__dirname, '..', '.wwebjs_auth');
+            if (fs.existsSync(sessionDir)) {
+                fs.rmSync(sessionDir, { recursive: true, force: true });
+                console.log('[SESSION-RESET] ✅ Folder session lama berhasil dihapus:', sessionDir);
+            } else {
+                console.log('[SESSION-RESET] ℹ️ Folder session tidak ditemukan (mungkin sudah terhapus).');
+            }
+        } catch (e) {
+            console.error('[SESSION-RESET] ❌ Gagal hapus session:', e.message);
+        }
+        // Trigger PM2 restart via exit (PM2 akan auto-restart)
+        setTimeout(() => {
+            console.log('[SESSION-RESET] 🔄 Memicu restart proses...');
+            process.exit(0);
+        }, 2000);
+    });
+});
 
 module.exports = { router, authenticateToken };

@@ -240,12 +240,8 @@ function invalidateConfigCache() {
 }
 
 // ─── Deteksi Nomor Pesanan ────────────────────────────────────────────────────
-/** Cari angka 14-20 digit berurutan (Tokopedia, Shopee, TikTok) */
-function detectOrderId(text) {
-    if (!text) return null;
-    const match = text.match(/\b(\d{14,20})\b/);
-    return match ? match[1] : null;
-}
+/** Gunakan utility terpusat agar regex konsisten di seluruh codebase */
+const { detectOrderId } = require('../utils/orderIdUtils');
 
 // ─── Deteksi Kata Konfirmasi Foto ────────────────────────────────────────────
 /**

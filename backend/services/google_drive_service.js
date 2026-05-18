@@ -464,7 +464,8 @@ async function processUploadQueue() {
 
             db.prepare(`
                 UPDATE drive_upload_queue
-                SET status = 'PENDING', resi = ?, store_name = ?, product_abbr = ?, sku = ?
+                SET status = 'PENDING', resi = ?, store_name = ?, product_abbr = ?, sku = ?,
+                    updated_at = datetime('now')
                 WHERE id = ?
             `).run(item.resi, item.store_name, productAbbr, sku, item.id);
             console.log(`[DRIVE] ✅ WAITING_RESI → PENDING: customer ${item.customer_id} (resi: ${item.resi})`);
@@ -499,7 +500,8 @@ async function processUploadQueue() {
 
             db.prepare(`
                 UPDATE drive_upload_queue
-                SET resi = ?, store_name = ?, product_abbr = ?, sku = ?
+                SET resi = ?, store_name = ?, product_abbr = ?, sku = ?,
+                    updated_at = datetime('now')
                 WHERE id = ?
             `).run(item.resi, item.store_name, productAbbr, sku, item.id);
             console.log(`[DRIVE] 🩹 HEALED incomplete PENDING: customer ${item.customer_id} (resi: ${item.resi})`);
@@ -508,25 +510,26 @@ async function processUploadQueue() {
         console.warn('[DRIVE] ⚠️ Error healing incomplete PENDING:', e.message);
     }
 
-    // 1.6. [NEW] Healing Pass untuk UPLOADING yang nyangkut > 1 jam
+    // 1.6. Healing Pass untuk UPLOADING yang nyangkut > 30 menit
+    // [BUG FIX] Gunakan updated_at (bukan created_at) agar timing lebih akurat.
+    // Item yang baru mulai UPLOADING tidak akan kena heal sebelum waktunya.
     try {
         const stuckItems = db.prepare(`
             UPDATE drive_upload_queue
-            SET status = 'PENDING'
+            SET status = 'PENDING', updated_at = datetime('now')
             WHERE status = 'UPLOADING'
-              AND created_at < datetime('now', '-1 hours')
+              AND COALESCE(updated_at, created_at) < datetime('now', '-30 minutes')
         `).run();
         if (stuckItems.changes > 0) {
-            console.log(`[DRIVE] 🩹 Memicu ulang ${stuckItems.changes} foto yang nyangkut di status UPLOADING (Ikon Biru)...`);
+            console.log(`[DRIVE] 🩹 Memicu ulang ${stuckItems.changes} foto yang nyangkut di status UPLOADING > 30 menit...`);
         }
     } catch (e) {
         console.warn('[DRIVE] ⚠️ Error healing UPLOADING:', e.message);
     }
 
-    // 2. Ambil PENDING items (max 10 per batch)
-    // [FIX] Hanya proses foto dari customer yang SUDAH KONFIRMASI (photo_confirmed=1)
-    // Ini mencegah upload foto ke Drive sebelum customer selesai kirim semua foto.
-    // Untuk non-Polaroid (required_photos=0): izinkan langsung upload setelah status SUDAH_KIRIM_FOTO
+    // 2. Ambil PENDING items (max 100 per batch)
+    // Semua foto (dengan maupun tanpa konfirmasi) diproses ke Drive.
+    // Foto yang belum punya resi/store_name akan berstatus WAITING_RESI dan di-hold sampai data lengkap.
     let pendingItems;
     try {
         pendingItems = db.prepare(`
@@ -565,7 +568,7 @@ async function processUploadQueue() {
 
         try {
             // Mark as UPLOADING
-            db.prepare(`UPDATE drive_upload_queue SET status = 'UPLOADING' WHERE id = ?`).run(item.id);
+            db.prepare(`UPDATE drive_upload_queue SET status = 'UPLOADING', updated_at = datetime('now') WHERE id = ?`).run(item.id);
 
             // 1. Download file dari Object Storage / local disk
             const fileNameLog = (item.storage_key || item.file_url || 'unknown').split('/').pop();
@@ -628,7 +631,7 @@ async function processUploadQueue() {
             // 4. Mark as DONE
             db.prepare(`
                 UPDATE drive_upload_queue
-                SET status = 'DONE', drive_file_id = ?
+                SET status = 'DONE', drive_file_id = ?, updated_at = datetime('now')
                 WHERE id = ?
             `).run(fileId, item.id);
 
@@ -650,12 +653,12 @@ async function processUploadQueue() {
 
             db.prepare(`
                 UPDATE drive_upload_queue
-                SET status = 'PENDING', retry_count = ?, error_msg = ?
+                SET status = 'PENDING', retry_count = ?, error_msg = ?, updated_at = datetime('now')
                 WHERE id = ?
             `).run(retryCount, msg.substring(0, 200), item.id);
 
             if (retryCount >= (item.max_retries || 5)) {
-                db.prepare(`UPDATE drive_upload_queue SET status = 'FAILED' WHERE id = ?`).run(item.id);
+                db.prepare(`UPDATE drive_upload_queue SET status = 'FAILED', updated_at = datetime('now') WHERE id = ?`).run(item.id);
                 console.error(`[DRIVE] ❌ Gagal setelah ${retryCount}x [${item.id}]: ${msg}`);
             } else {
                 console.warn(`[DRIVE] 🔄 Retry ${retryCount}/${item.max_retries} [${item.id}]: ${msg.substring(0, 80)}`);

@@ -5,7 +5,7 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import apiClient, { initSocket, API_BASE_URL } from "@/lib/apiClient";
 import Link from "next/link";
 import { format, startOfDay, endOfDay, subDays, startOfMonth, endOfMonth } from "date-fns";
-import { Search, Filter, Calendar, Trash2, Image as ImageIcon, CheckCircle, XCircle } from "lucide-react";
+import { Search, Filter, Calendar, Trash2, Image as ImageIcon, CheckCircle, XCircle, CloudUpload, RefreshCw, AlertTriangle, RotateCcw } from "lucide-react";
 
 type Customer = {
   id: string;
@@ -16,6 +16,15 @@ type Customer = {
   is_valid: boolean;
   created_at: string;
   media?: { count: number }[]; // Gabungan dari Supabase aggregation
+};
+
+type DriveStats = {
+  PENDING: number;
+  WAITING_RESI: number;
+  UPLOADING: number;
+  DONE: number;
+  FAILED: number;
+  total: number;
 };
 
 export default function DashboardInbox() {
@@ -33,6 +42,7 @@ function DashboardInboxContent() {
 
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
+  const [driveStats, setDriveStats] = useState<DriveStats | null>(null);
   
   // Fitur Penghapusan Massal
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -122,6 +132,20 @@ function DashboardInboxContent() {
     fetchCustomers();
   }, [fetchCustomers]);
 
+  // Drive Stats polling — setiap 30 detik (F3-FEAT2)
+  const fetchDriveStats = useCallback(async () => {
+    try {
+      const res = await apiClient.get('/drive-stats');
+      if (res.data?.success) setDriveStats(res.data.stats);
+    } catch (e) { /* silent — Drive mungkin tidak dikonfigurasi */ }
+  }, []);
+
+  useEffect(() => {
+    fetchDriveStats();
+    const interval = setInterval(fetchDriveStats, 30000);
+    return () => clearInterval(interval);
+  }, [fetchDriveStats]);
+
   // Poin 4.B & Poin 2: useEffect 2 - Subscribe tunggal, TANPA TRIGGER LOAD, Inject local mutation.
   useEffect(() => {
     const socket = initSocket();
@@ -176,6 +200,17 @@ function DashboardInboxContent() {
         alert(res.data.message || `Sapu jagat untuk ${days} hari terakhir berhasil dimulai di background!`);
     } catch (err: any) {
         alert('Gagal memulai: ' + (err.response?.data?.error || err.message));
+    }
+  };
+
+  // [WA SESSION FIX] Reset session WA untuk ganti nomor atau session korup
+  const handleSessionReset = async () => {
+    if (!confirm('⚠️ RESET SESSION WA\n\nIni akan menghapus session WA lama dan meminta QR scan ulang.\n\nGunakan ini jika:\n- Ganti nomor WA baru\n- Session korup/terus error\n\nServer akan restart otomatis dalam ~30 detik.\nLanjutkan?')) return;
+    try {
+      await apiClient.post('/wa/reset-session');
+      alert('✅ Reset session dimulai! Server akan restart dan minta QR baru dalam ~30 detik.\n\nBuka halaman QR di menu WhatsApp untuk scan nomor baru.');
+    } catch (err: any) {
+      alert('Gagal reset: ' + (err.response?.data?.error || err.message));
     }
   };
 
@@ -264,16 +299,24 @@ function DashboardInboxContent() {
 
   return (
      <div className="p-8 h-full flex flex-col bg-gray-50/50">
-      <div className="flex justify-between items-end mb-6">
+     <div className="flex justify-between items-end mb-6">
          <div>
             <h1 className="text-2xl font-black tracking-tight text-gray-900">Inbox Pesanan</h1>
             <p className="text-sm text-gray-500 font-medium mt-1">Mengelola pelanggan dari sumber API WhatsApp.</p>
          </div>
-         <div className="flex items-center space-x-3">
+         <div className="flex items-center space-x-2">
+             <button 
+                 onClick={handleSessionReset}
+                 className="text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200 px-3 py-2 rounded-xl shadow-sm flex items-center space-x-1.5 hover:bg-gray-100 hover:text-gray-700 transition-colors"
+                 title="Reset Session WA (Ganti Nomor/Korup Session)"
+             >
+                <RotateCcw size={13} />
+                <span>Reset WA</span>
+             </button>
              <button 
                  onClick={handleEmergencySync}
                  className="text-sm font-bold bg-red-50 text-red-600 border border-red-200 px-4 py-2 rounded-xl shadow-sm flex items-center space-x-2 hover:bg-red-100 transition-colors"
-                 title="Sapu Jagat 2 Hari Terakhir"
+                 title="Sapu Jagat — Resync semua customer"
              >
                 <span className="animate-pulse">🚨</span>
                 <span>Emergency Sync</span>
@@ -285,6 +328,33 @@ function DashboardInboxContent() {
          </div>
       </div>
       
+     {/* Drive Stats Widget — F3-FEAT2 */}
+      {driveStats !== null && (
+        <div className="flex flex-wrap gap-2 mb-4">
+          <div className="flex items-center space-x-2 bg-white border border-gray-200 rounded-xl px-3 py-1.5 shadow-sm text-xs font-bold">
+            <CloudUpload size={14} className="text-gray-400" />
+            <span className="text-gray-500">Drive:</span>
+            {driveStats.PENDING > 0 && (
+              <span className="bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full">{driveStats.PENDING} Pending</span>
+            )}
+            {driveStats.WAITING_RESI > 0 && (
+              <span className="bg-orange-100 text-orange-700 px-2 py-0.5 rounded-full">{driveStats.WAITING_RESI} Menunggu Resi</span>
+            )}
+            {driveStats.UPLOADING > 0 && (
+              <span className="bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <RefreshCw size={10} className="animate-spin" /> {driveStats.UPLOADING} Uploading
+              </span>
+            )}
+            {driveStats.FAILED > 0 && (
+              <span className="bg-red-100 text-red-700 px-2 py-0.5 rounded-full flex items-center gap-1">
+                <AlertTriangle size={10} /> {driveStats.FAILED} Gagal
+              </span>
+            )}
+            <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded-full">{driveStats.DONE} Selesai</span>
+          </div>
+        </div>
+      )}
+
       {/* Fitur Pencarian & Filter */}
       <div className="flex flex-col lg:flex-row gap-3 mb-4">
          <div className="relative flex-1">
