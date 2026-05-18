@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import apiClient from "@/lib/apiClient";
-import { Activity, Wifi, WifiOff, Clock, HardDrive, Database, MessageSquare, RefreshCw, LogIn, AlertTriangle, CheckCircle, Loader2, Users, Image, Mail, Package, Server } from "lucide-react";
+import { Activity, Wifi, WifiOff, Clock, HardDrive, MessageSquare, RefreshCw, LogIn, AlertTriangle, CheckCircle, Loader2, Users, Image, Mail, Package, Server } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 type SystemStatus = {
@@ -17,7 +17,6 @@ type SystemStatus = {
   server: { uptimeMs: number; uptimeHuman: string; nodeVersion: string; memoryMB: number };
 };
 
-// ─── Status Color Helpers ─────────────────────────────────────────────────────
 const overallColor = (s: string) => ({
   ok: "bg-emerald-50 border-emerald-200 text-emerald-700",
   degraded: "bg-amber-50 border-amber-200 text-amber-700",
@@ -56,7 +55,6 @@ function LoginGate({ onLogin }: { onLogin: (token: string) => void }) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
-        {/* Logo */}
         <div className="text-center mb-8">
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 mb-4">
             <Activity size={32} className="text-indigo-400" />
@@ -64,8 +62,6 @@ function LoginGate({ onLogin }: { onLogin: (token: string) => void }) {
           <h1 className="text-2xl font-black text-white">System Monitor</h1>
           <p className="text-slate-400 text-sm mt-1">Kirimfoto CRM — Internal Dashboard</p>
         </div>
-
-        {/* Form */}
         <form onSubmit={handleSubmit} className="bg-slate-800/60 backdrop-blur border border-slate-700/50 rounded-2xl p-6 shadow-2xl">
           <div className="space-y-4">
             <div>
@@ -118,9 +114,7 @@ function StatCard({ icon, label, value, sub, color = "indigo" }: {
   };
   return (
     <div className={`rounded-2xl border p-4 ${colorMap[color] || colorMap.indigo}`}>
-      <div className="flex items-start justify-between">
-        <div className="text-gray-500">{icon}</div>
-      </div>
+      <div className="text-gray-500">{icon}</div>
       <div className="mt-3">
         <div className="text-2xl font-black text-gray-900">{value.toLocaleString()}</div>
         <div className="text-xs font-bold text-gray-500 mt-0.5">{label}</div>
@@ -134,17 +128,15 @@ function StatCard({ icon, label, value, sub, color = "indigo" }: {
 function DriveBar({ stats }: { stats: SystemStatus["drive"] }) {
   const total = stats.DONE + stats.PENDING + stats.WAITING_RESI + stats.UPLOADING + stats.FAILED;
   if (total === 0) return <div className="text-xs text-gray-400">Belum ada data Drive</div>;
-
   const pct = (n: number) => total > 0 ? Math.round((n / total) * 100) : 0;
-
   return (
     <div className="space-y-2">
       <div className="flex rounded-full overflow-hidden h-3 w-full bg-gray-100">
-        {stats.DONE > 0 && <div className="bg-emerald-400 h-full transition-all" style={{ width: pct(stats.DONE) + "%" }} title={`Done: ${stats.DONE}`} />}
-        {stats.UPLOADING > 0 && <div className="bg-blue-400 h-full animate-pulse transition-all" style={{ width: pct(stats.UPLOADING) + "%" }} title={`Uploading: ${stats.UPLOADING}`} />}
-        {stats.PENDING > 0 && <div className="bg-amber-400 h-full transition-all" style={{ width: pct(stats.PENDING) + "%" }} title={`Pending: ${stats.PENDING}`} />}
-        {stats.WAITING_RESI > 0 && <div className="bg-orange-400 h-full transition-all" style={{ width: pct(stats.WAITING_RESI) + "%" }} title={`Menunggu Resi: ${stats.WAITING_RESI}`} />}
-        {stats.FAILED > 0 && <div className="bg-red-500 h-full transition-all" style={{ width: pct(stats.FAILED) + "%" }} title={`Gagal: ${stats.FAILED}`} />}
+        {stats.DONE > 0 && <div className="bg-emerald-400 h-full transition-all" style={{ width: pct(stats.DONE) + "%" }} />}
+        {stats.UPLOADING > 0 && <div className="bg-blue-400 h-full animate-pulse" style={{ width: pct(stats.UPLOADING) + "%" }} />}
+        {stats.PENDING > 0 && <div className="bg-amber-400 h-full transition-all" style={{ width: pct(stats.PENDING) + "%" }} />}
+        {stats.WAITING_RESI > 0 && <div className="bg-orange-400 h-full transition-all" style={{ width: pct(stats.WAITING_RESI) + "%" }} />}
+        {stats.FAILED > 0 && <div className="bg-red-500 h-full transition-all" style={{ width: pct(stats.FAILED) + "%" }} />}
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />{stats.DONE} Selesai</span>
@@ -157,7 +149,7 @@ function DriveBar({ stats }: { stats: SystemStatus["drive"] }) {
   );
 }
 
-// ─── Main Status Page ─────────────────────────────────────────────────────────
+// ─── Main Page ────────────────────────────────────────────────────────────────
 export default function SystemStatusPage() {
   const [token, setToken] = useState<string | null>(null);
   const [status, setStatus] = useState<SystemStatus | null>(null);
@@ -167,7 +159,7 @@ export default function SystemStatusPage() {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const countRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Check existing token on mount
+  // Cek token yang tersimpan di sessionStorage
   useEffect(() => {
     const saved = sessionStorage.getItem(STATUS_TOKEN_KEY);
     if (saved) setToken(saved);
@@ -201,6 +193,7 @@ export default function SystemStatusPage() {
     };
   }, [token, fetchStatus]);
 
+  // Tampilkan login gate jika belum ada token
   if (!token) return <LoginGate onLogin={setToken} />;
 
   const handleLogout = () => {
@@ -212,7 +205,6 @@ export default function SystemStatusPage() {
   return (
     <div className="min-h-screen bg-gray-50 p-6">
       <div className="max-w-5xl mx-auto">
-
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
@@ -236,7 +228,9 @@ export default function SystemStatusPage() {
               <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
               Refresh
             </button>
-            <button onClick={handleLogout} className="text-xs text-gray-400 hover:text-gray-600 transition-colors">Keluar</button>
+            <button onClick={handleLogout} className="text-xs text-gray-400 hover:text-gray-600 transition-colors">
+              Keluar
+            </button>
           </div>
         </div>
 
@@ -248,20 +242,18 @@ export default function SystemStatusPage() {
 
         {status && (
           <div className="space-y-5">
-
-            {/* Overall Health Banner */}
+            {/* Overall Health */}
             <div className={`rounded-2xl border-2 p-4 flex items-center gap-3 ${overallColor(status.overall)}`}>
               {overallIcon(status.overall)}
               <div>
-                <div className="font-black text-lg capitalize">
+                <div className="font-black text-lg">
                   {status.overall === "ok" ? "✅ Semua Sistem Normal" : status.overall === "degraded" ? "⚠️ Sistem Degraded" : "🔴 Ada Masalah Kritis"}
                 </div>
-                {status.issues.length > 0 && (
-                  <ul className="text-sm mt-1 space-y-0.5">
-                    {status.issues.map((issue, i) => <li key={i}>• {issue}</li>)}
-                  </ul>
+                {status.issues.length > 0 ? (
+                  <ul className="text-sm mt-1 space-y-0.5">{status.issues.map((issue, i) => <li key={i}>• {issue}</li>)}</ul>
+                ) : (
+                  <div className="text-sm opacity-75">Tidak ada masalah terdeteksi. Sistem berjalan optimal.</div>
                 )}
-                {status.issues.length === 0 && <div className="text-sm opacity-75">Tidak ada masalah terdeteksi. Sistem berjalan optimal.</div>}
               </div>
             </div>
 
@@ -307,9 +299,7 @@ export default function SystemStatusPage() {
                 <h2 className="font-black text-gray-900 text-sm uppercase tracking-wider flex items-center gap-2">
                   <HardDrive size={15} className="text-blue-500" /> Google Drive Upload Queue
                 </h2>
-                <span className="text-xs text-gray-400">
-                  Total: {status.drive.total.toLocaleString()} item
-                </span>
+                <span className="text-xs text-gray-400">Total: {status.drive.total.toLocaleString()} item</span>
               </div>
               <DriveBar stats={status.drive} />
               {status.drive.lastUploadAt && (
@@ -327,10 +317,8 @@ export default function SystemStatusPage() {
 
             {/* Server Info */}
             <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
-              <StatCard icon={<Clock size={18} />} label="Server Uptime" value={status.server.uptimeHuman} color="emerald"
-                sub={"Sejak terakhir restart"} />
-              <StatCard icon={<Server size={18} />} label="Memory Usage" value={status.server.memoryMB + " MB"} color="amber"
-                sub={"Node " + status.server.nodeVersion} />
+              <StatCard icon={<Clock size={18} />} label="Server Uptime" value={status.server.uptimeHuman} color="emerald" sub="Sejak terakhir restart" />
+              <StatCard icon={<Server size={18} />} label="Memory Usage" value={status.server.memoryMB + " MB"} color="amber" sub={"Node " + status.server.nodeVersion} />
               <StatCard icon={<Mail size={18} />} label="Pesan Bot Antri" value={status.queues.outgoingMessages} color="blue"
                 sub={status.queues.outgoingMessages > 0 ? "Sedang diproses outgoing queue" : "Queue kosong"} />
             </div>

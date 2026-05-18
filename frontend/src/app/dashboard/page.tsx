@@ -343,9 +343,11 @@ function DashboardInboxContent() {
          </div>
          <div className="flex items-center space-x-2">
              <Link 
-                 href="/dashboard/status"
+                 href="/status"
                  className="text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200 px-3 py-2 rounded-xl shadow-sm flex items-center space-x-1.5 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
                  title="System Monitor"
+                 target="_blank"
+                 rel="noopener noreferrer"
              >
                 <Activity size={13} />
                 <span>Monitor</span>
