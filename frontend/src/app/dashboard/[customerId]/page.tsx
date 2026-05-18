@@ -68,6 +68,19 @@ export default function ChatDetail() {
     const media = mediaList.find(m => m.id === id);
     return media && isProductionMedia(media);
   });
+
+  // [FIX] Toggle seleksi media (add/remove dari Set)
+  const toggleMediaSelect = (mediaId: string) => {
+    setSelectedMedia(prev => {
+      const next = new Set(prev);
+      if (next.has(mediaId)) {
+        next.delete(mediaId);
+      } else {
+        next.add(mediaId);
+      }
+      return next;
+    });
+  };
   useEffect(() => {
     fetchData();
 
