@@ -2120,6 +2120,27 @@ app.post('/api/media/delete-bulk', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════
+// POST /api/media/exclude-bulk — Tandai foto dikecualikan dari produksi (file TIDAK dihapus)
+app.post('/api/media/exclude-bulk', async (req, res) => {
+    const { media_ids, customer_id } = req.body;
+    if (!Array.isArray(media_ids) || media_ids.length === 0 || !customer_id) {
+        return res.status(400).json({ error: 'media_ids (array) dan customer_id diperlukan.' });
+    }
+    try {
+        const { error } = await supabase
+            .from('media')
+            .update({ excluded_from_production: true })
+            .in('id', media_ids)
+            .eq('customer_id', customer_id);
+        if (error) throw error;
+        console.log('[MEDIA-EXCLUDE] OK ' + media_ids.length + ' foto dikecualikan — customer ' + customer_id);
+        return res.json({ success: true, excluded: media_ids.length });
+    } catch (err) {
+        console.error('[MEDIA-EXCLUDE] Error:', err.message);
+        return res.status(500).json({ error: 'Gagal mengecualikan media: ' + err.message });
+    }
+});
+
 // ENDPOINT API: KONFIGURASI AI BOT
 // ═══════════════════════════════════════════════════════════
 

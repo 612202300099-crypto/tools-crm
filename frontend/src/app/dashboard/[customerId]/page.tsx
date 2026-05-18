@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useRouter } from "next/navigation";
 import apiClient, { initSocket, API_BASE_URL } from "@/lib/apiClient";
 import JSZip from "jszip";
@@ -69,17 +69,133 @@ export default function ChatDetail() {
     return media && isProductionMedia(media);
   });
 
-  // [FIX] Toggle seleksi media (add/remove dari Set)
-  const toggleMediaSelect = (mediaId: string) => {
-    setSelectedMedia(prev => {
-      const next = new Set(prev);
-      if (next.has(mediaId)) {
-        next.delete(mediaId);
-      } else {
-        next.add(mediaId);
-      }
-      return next;
+  // [UX] Toggle seleksi media (add/remove dari Set)
+  const lastClickedIndexRef = useRef<number | null>(null);
+  const toggleMediaSelect = (mediaId: string, index: number, shiftKey = false) => {
+    if (shiftKey && lastClickedIndexRef.current !== null) {
+      // Shift+klik → pilih range dari lastClicked sampai index ini
+      const lo = Math.min(lastClickedIndexRef.current, index);
+      const hi = Math.max(lastClickedIndexRef.current, index);
+      const rangeIds = mediaList.slice(lo, hi + 1).map(m => m.id);
+      setSelectedMedia(prev => {
+        const next = new Set(prev);
+        rangeIds.forEach(id => next.add(id));
+        return next;
+      });
+    } else {
+      setSelectedMedia(prev => {
+        const next = new Set(prev);
+        if (next.has(mediaId)) { next.delete(mediaId); } else { next.add(mediaId); }
+        return next;
+      });
+      lastClickedIndexRef.current = index;
+    }
+  };
+
+  // [UX] Drag-to-select (rubber band) state
+  const gridRef = useRef<HTMLDivElement>(null);
+  const dragStartRef = useRef<{x: number; y: number} | null>(null);
+  const [rubberBand, setRubberBand] = useState<{x:number;y:number;w:number;h:number}|null>(null);
+  const isDragging = useRef(false);
+
+  const handleGridMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    // Hanya aktifkan drag jika klik pada grid container, bukan foto
+    if ((e.target as HTMLElement).closest('[data-media-item]')) return;
+    const rect = gridRef.current!.getBoundingClientRect();
+    dragStartRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top + gridRef.current!.scrollTop };
+    isDragging.current = false;
+  }, []);
+
+  const handleGridMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!dragStartRef.current || !gridRef.current) return;
+    const rect = gridRef.current.getBoundingClientRect();
+    const curX = e.clientX - rect.left;
+    const curY = e.clientY - rect.top + gridRef.current.scrollTop;
+    const dx = curX - dragStartRef.current.x;
+    const dy = curY - dragStartRef.current.y;
+    if (!isDragging.current && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+    isDragging.current = true;
+    setRubberBand({
+      x: Math.min(dragStartRef.current.x, curX),
+      y: Math.min(dragStartRef.current.y, curY),
+      w: Math.abs(dx),
+      h: Math.abs(dy),
     });
+  }, []);
+
+  const handleGridMouseUp = useCallback(() => {
+    if (!isDragging.current || !rubberBand || !gridRef.current) {
+      dragStartRef.current = null;
+      setRubberBand(null);
+      return;
+    }
+    // Cari semua foto yang bersinggungan dengan rubber band
+    const items = gridRef.current.querySelectorAll<HTMLDivElement>('[data-media-item]');
+    const gridRect = gridRef.current.getBoundingClientRect();
+    const scrollTop = gridRef.current.scrollTop;
+    const rb = rubberBand;
+    const intersected = new Set<string>();
+    items.forEach(el => {
+      const r = el.getBoundingClientRect();
+      const elLeft = r.left - gridRect.left;
+      const elTop  = r.top  - gridRect.top  + scrollTop;
+      if (elLeft < rb.x + rb.w && elLeft + r.width  > rb.x &&
+          elTop  < rb.y + rb.h && elTop  + r.height > rb.y) {
+        const mid = el.dataset.mediaId;
+        if (mid) intersected.add(mid);
+      }
+    });
+    if (intersected.size > 0) {
+      setSelectedMedia(prev => { const n = new Set(prev); intersected.forEach(id => n.add(id)); return n; });
+    }
+    dragStartRef.current = null;
+    setRubberBand(null);
+    isDragging.current = false;
+  }, [rubberBand]);
+
+  // [UX] Pilih N foto pertama (foto produksi)
+  const handleSelectFirstN = () => {
+    const required = customer?.required_photos;
+    const nStr = window.prompt(
+      `Pilih berapa foto pertama?\n(Foto produksi tersedia: ${mediaList.filter(isProductionMedia).length}, wajib kirim: ${required || '?'})`,
+      required ? String(required) : ''
+    );
+    if (!nStr) return;
+    const n = parseInt(nStr);
+    if (isNaN(n) || n <= 0) return;
+    const productionMedia = mediaList.filter(isProductionMedia);
+    const toSelect = productionMedia.slice(0, n).map(m => m.id);
+    setSelectedMedia(new Set(toSelect));
+  };
+
+  // [UX] Tandai foto berlebih sebagai excluded (sisakan N foto pertama)
+  const handleExcludeExcess = async () => {
+    const required = customer?.required_photos;
+    const nStr = window.prompt(
+      `Sisakan berapa foto untuk produksi?\n(Foto produksi saat ini: ${mediaList.filter(isProductionMedia).length}, wajib kirim: ${required || '?'})\n\nFoto setelahnya akan ditandai sebagai "dikecualikan" (tidak ikut ZIP/Drive).`,
+      required ? String(required) : ''
+    );
+    if (!nStr) return;
+    const n = parseInt(nStr);
+    if (isNaN(n) || n <= 0) return;
+    const productionMedia = mediaList.filter(isProductionMedia);
+    if (productionMedia.length <= n) {
+      alert(`Foto produksi hanya ${productionMedia.length} — tidak perlu dikecualikan.`);
+      return;
+    }
+    const toExclude = productionMedia.slice(n).map(m => m.id);
+    if (!window.confirm(`${toExclude.length} foto akan dikecualikan dari produksi (tidak dihapus). Lanjutkan?`)) return;
+    try {
+      await fetch(`${WA_API_URL}/api/media/exclude-bulk`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ media_ids: toExclude, customer_id: customerId })
+      });
+      setMediaList(prev => prev.map(m => toExclude.includes(m.id) ? { ...m, excluded_from_production: true } : m));
+      setScanResult({ type: 'success', message: `✅ ${toExclude.length} foto berhasil dikecualikan dari produksi.` });
+    } catch (err: any) {
+      setScanResult({ type: 'error', message: `❌ Gagal: ${err.message}` });
+    }
   };
   useEffect(() => {
     fetchData();
@@ -435,7 +551,7 @@ export default function ChatDetail() {
   const selectAllMedia = () => {
     const productionIds = mediaList.filter(isProductionMedia).map(m => m.id);
     if (selectedMedia.size === productionIds.length && productionIds.every(id => selectedMedia.has(id))) {
-      setSelectedMedia(new Set());
+      setSelectedMedia(new Set()); lastClickedIndexRef.current = null;
     } else {
       setSelectedMedia(new Set(productionIds));
     }
@@ -564,17 +680,59 @@ export default function ChatDetail() {
 
         {/* === 2. PANEL MEDIA === */}
         <div className="w-1/3 flex flex-col bg-gray-100/30">
-          <div className="p-4 bg-white border-b flex items-center justify-between shadow-sm z-10">
-             <div className="font-bold text-gray-800 flex items-center space-x-2">
-              <ImageIcon size={18} className="text-blue-600" />
-              <span>Media ({mediaList.filter(isProductionMedia).length}/{mediaList.length})</span>
+          <div className="p-3 bg-white border-b flex flex-col gap-2 shadow-sm z-10">
+            {/* Baris 1: Judul + Counter */}
+            <div className="flex items-center justify-between">
+              <div className="font-bold text-gray-800 flex items-center space-x-2">
+                <ImageIcon size={16} className="text-blue-600" />
+                <span className="text-sm">Media</span>
+                <span className="bg-blue-100 text-blue-700 text-xs font-black px-2 py-0.5 rounded-full">
+                  {mediaList.filter(isProductionMedia).length} produksi
+                </span>
+                {customer?.required_photos > 0 && mediaList.filter(isProductionMedia).length > customer.required_photos && (
+                  <span className="bg-red-100 text-red-700 text-xs font-black px-2 py-0.5 rounded-full animate-pulse">
+                    +{mediaList.filter(isProductionMedia).length - customer.required_photos} lebih
+                  </span>
+                )}
+              </div>
+              {selectedMedia.size > 0 && (
+                <span className="text-xs font-bold text-indigo-600">{selectedMedia.size} dipilih</span>
+              )}
             </div>
-            <button onClick={selectAllMedia} className="text-xs text-blue-600 font-bold uppercase tracking-wider hover:text-blue-800 transition">
-              {selectedMedia.size > 0 && selectedProductionIds().length === mediaList.filter(isProductionMedia).length ? 'Deselect All' : 'Select All'}
-            </button>
+            {/* Baris 2: Quick Action Buttons */}
+            <div className="flex gap-1.5 flex-wrap">
+              <button onClick={selectAllMedia} className="text-[10px] font-bold bg-gray-100 text-gray-600 px-2 py-1 rounded-lg hover:bg-gray-200 transition">
+                {selectedMedia.size > 0 && selectedProductionIds().length === mediaList.filter(isProductionMedia).length ? '✕ Batal Semua' : '☑ Semua'}
+              </button>
+              <button onClick={handleSelectFirstN} className="text-[10px] font-bold bg-indigo-50 text-indigo-700 px-2 py-1 rounded-lg hover:bg-indigo-100 transition" title="Pilih N foto pertama">
+                🔢 Pilih N Foto
+              </button>
+              <button onClick={handleExcludeExcess} className="text-[10px] font-bold bg-amber-50 text-amber-700 px-2 py-1 rounded-lg hover:bg-amber-100 transition" title="Tandai foto berlebih sebagai dikecualikan">
+                ✂ Buang Berlebih
+              </button>
+              <span className="text-[10px] text-gray-400 flex items-center gap-1" title="Geser mouse di atas foto untuk pilih banyak, atau Shift+klik untuk pilih range">💡 Drag / Shift+klik</span>
+            </div>
           </div>
           
-          <div className="flex-1 overflow-y-auto p-4 relative">
+          <div
+            ref={gridRef}
+            className="flex-1 overflow-y-auto p-4 relative select-none"
+            onMouseDown={handleGridMouseDown}
+            onMouseMove={handleGridMouseMove}
+            onMouseUp={handleGridMouseUp}
+            onMouseLeave={handleGridMouseUp}
+          >
+             {/* Rubber-band selection box */}
+             {rubberBand && (
+               <div
+                 className="absolute pointer-events-none z-50 border-2 border-indigo-500 bg-indigo-500/10 rounded"
+                 style={{
+                   left: rubberBand.x, top: rubberBand.y,
+                   width: rubberBand.w, height: rubberBand.h,
+                 }}
+               />
+             )}
+
              {/* Notifikasi Hasil Scan (Toast) */}
              {scanResult && (
                <div className={clsx(
@@ -588,40 +746,48 @@ export default function ChatDetail() {
              )}
 
              <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
-               {mediaList.map(media => {
+               {mediaList.map((media, idx) => {
                  const isSelected = selectedMedia.has(media.id);
                  const isExcluded = !isProductionMedia(media);
                  return (
-                   <div 
-                     key={media.id} 
-                     onClick={() => toggleMediaSelect(media.id)}
+                   <div
+                     key={media.id}
+                     data-media-item="true"
+                     data-media-id={media.id}
+                     onClick={(e) => toggleMediaSelect(media.id, idx, e.shiftKey)}
                      className={clsx(
-                       "aspect-square relative rounded-xl border-[3px] overflow-hidden cursor-pointer group bg-gray-200 shadow-sm",
-                       isSelected ? "border-indigo-500 shadow-md ring-4 ring-indigo-50 border-white" : "border-transparent"
+                       "aspect-square relative rounded-xl border-[3px] overflow-hidden cursor-pointer group bg-gray-200 shadow-sm transition-all duration-150",
+                       isSelected ? "border-indigo-500 shadow-md ring-4 ring-indigo-100" : "border-transparent hover:border-gray-300",
+                       isExcluded && !isSelected && "opacity-50"
                      )}
                    >
                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                     <img src={media.file_url} className="w-full h-full object-cover transition transform duration-300 group-hover:scale-110" alt="Order file" loading="lazy" />
+                     <img src={media.file_url} className="w-full h-full object-cover transition transform duration-300 group-hover:scale-105" alt="Order file" loading="lazy" draggable={false} />
+
+                     {/* Badge: dikecualikan */}
                      {isExcluded && (
-                       <div className="absolute inset-x-2 bottom-2 z-10 rounded-lg bg-amber-50/95 border border-amber-200 px-2 py-1 text-[10px] font-black text-amber-800 text-center shadow-sm">
-                         Nomor Pesanan
-                       </div>
-                     )}
-                     
-                     {/* Indikator Status Drive */}
-                     {driveStatus[media.id] && (
-                       <div className="absolute top-2 left-2 z-10 flex items-center justify-center p-1.5 rounded-full bg-white/90 shadow-md backdrop-blur-sm border border-gray-100">
-                          {driveStatus[media.id] === 'DONE' && <CheckCircle size={14} className="text-green-500" />}
-                          {driveStatus[media.id] === 'UPLOADING' && <Cloud size={14} className="text-blue-500 animate-pulse" />}
-                          {(driveStatus[media.id] === 'PENDING' || driveStatus[media.id] === 'WAITING_RESI') && <span className="text-xs">⏳</span>}
-                          {driveStatus[media.id] === 'FAILED' && <span className="text-xs">❌</span>}
-                          {driveStatus[media.id] === 'SKIPPED' && <span className="text-xs">⏭️</span>}
+                       <div className="absolute inset-0 bg-amber-900/40 flex items-end p-1.5">
+                         <div className="w-full rounded bg-amber-50/95 border border-amber-200 px-1.5 py-0.5 text-[9px] font-black text-amber-800 text-center">
+                           {media.media_kind === 'order_proof' ? 'Nomor Pesanan' : 'Dikecualikan'}
+                         </div>
                        </div>
                      )}
 
+                     {/* Indikator Status Drive */}
+                     {driveStatus[media.id] && (
+                       <div className="absolute top-1.5 left-1.5 z-10 flex items-center justify-center p-1 rounded-full bg-white/90 shadow-sm">
+                          {driveStatus[media.id] === 'DONE' && <CheckCircle size={12} className="text-green-500" />}
+                          {driveStatus[media.id] === 'UPLOADING' && <Cloud size={12} className="text-blue-500 animate-pulse" />}
+                          {(driveStatus[media.id] === 'PENDING' || driveStatus[media.id] === 'WAITING_RESI') && <span className="text-[10px]">⏳</span>}
+                          {driveStatus[media.id] === 'FAILED' && <span className="text-[10px]">❌</span>}
+                          {driveStatus[media.id] === 'SKIPPED' && <span className="text-[10px]">⏭️</span>}
+                       </div>
+                     )}
+
+                     {/* Nomor urut foto (tampil saat selected) */}
                      {isSelected && (
-                       <div className="absolute top-2 right-2 z-10 bg-indigo-500 text-white rounded-full p-1 shadow-lg ring-2 ring-white">
-                         <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="3" d="M5 13l4 4L19 7"></path></svg>
+                       <div className="absolute top-1.5 right-1.5 z-10 bg-indigo-500 text-white rounded-full w-5 h-5 flex items-center justify-center shadow-lg ring-2 ring-white text-[9px] font-black">
+                         {Array.from(selectedMedia).indexOf(media.id) + 1}
                        </div>
                      )}
                    </div>
