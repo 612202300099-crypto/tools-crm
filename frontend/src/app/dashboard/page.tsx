@@ -5,7 +5,7 @@ import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import apiClient, { initSocket, API_BASE_URL } from "@/lib/apiClient";
 import Link from "next/link";
 import { format, startOfDay, endOfDay, subDays, startOfMonth, endOfMonth } from "date-fns";
-import { Search, Filter, Calendar, Trash2, Image as ImageIcon, CheckCircle, XCircle, CloudUpload, RefreshCw, AlertTriangle, RotateCcw } from "lucide-react";
+import { Search, Filter, Calendar, Trash2, Image as ImageIcon, CheckCircle, XCircle, CloudUpload, RefreshCw, AlertTriangle, RotateCcw, Activity } from "lucide-react";
 
 type Customer = {
   id: string;
@@ -43,6 +43,8 @@ function DashboardInboxContent() {
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [driveStats, setDriveStats] = useState<DriveStats | null>(null);
+  const [isBulkResyncing, setIsBulkResyncing] = useState(false);
+  const [bulkResyncProgress, setBulkResyncProgress] = useState<string | null>(null);
   
   // Fitur Penghapusan Massal
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -149,6 +151,18 @@ function DashboardInboxContent() {
   // Poin 4.B & Poin 2: useEffect 2 - Subscribe tunggal, TANPA TRIGGER LOAD, Inject local mutation.
   useEffect(() => {
     const socket = initSocket();
+
+    // Listen bulk resync events
+    socket.on('bulk_resync_progress', (data: { message: string; current: number; total: number }) => {
+      setBulkResyncProgress(`${data.message}`);
+    });
+    socket.on('bulk_resync_done', (data: { message: string }) => {
+      setIsBulkResyncing(false);
+      setBulkResyncProgress(null);
+      setSelectedIds(new Set());
+      alert('✅ ' + (data.message || 'Gali Ulang Massal selesai!'));
+    });
+
     
     const handleDbChange = (payload: any) => {
         if (payload.table !== 'customers') return;
@@ -211,6 +225,29 @@ function DashboardInboxContent() {
       alert('✅ Reset session dimulai! Server akan restart dan minta QR baru dalam ~30 detik.\n\nBuka halaman QR di menu WhatsApp untuk scan nomor baru.');
     } catch (err: any) {
       alert('Gagal reset: ' + (err.response?.data?.error || err.message));
+    }
+  };
+
+  // [F3-FEAT3] Bulk Resync — Gali Ulang Massal dari floating action bar
+  const handleBulkResync = async () => {
+    if (selectedIds.size === 0) return;
+    if (selectedIds.size > 20) {
+      alert('Maksimal 20 customer per batch. Kurangi pilihan Anda.');
+      return;
+    }
+    if (!confirm(`🔄 GALI ULANG MASSAL\n\n${selectedIds.size} customer dipilih.\n\nSistem akan menggali ulang semua riwayat chat dan foto untuk setiap customer secara bergantian.\n\nProses berjalan di background (~3-5 menit tergantung jumlah foto).\n\nLanjutkan?`)) return;
+
+    setIsBulkResyncing(true);
+    setBulkResyncProgress('Memulai Gali Ulang Massal...');
+
+    try {
+      const ids = Array.from(selectedIds);
+      const res = await apiClient.post('/wa/bulk-resync', { customer_ids: ids });
+      setBulkResyncProgress(res.data.message || 'Proses dimulai...');
+    } catch (err: any) {
+      alert('Gagal: ' + (err.response?.data?.error || err.message));
+      setIsBulkResyncing(false);
+      setBulkResyncProgress(null);
     }
   };
 
@@ -305,6 +342,14 @@ function DashboardInboxContent() {
             <p className="text-sm text-gray-500 font-medium mt-1">Mengelola pelanggan dari sumber API WhatsApp.</p>
          </div>
          <div className="flex items-center space-x-2">
+             <Link 
+                 href="/dashboard/status"
+                 className="text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200 px-3 py-2 rounded-xl shadow-sm flex items-center space-x-1.5 hover:bg-indigo-50 hover:text-indigo-600 hover:border-indigo-200 transition-colors"
+                 title="System Monitor"
+             >
+                <Activity size={13} />
+                <span>Monitor</span>
+             </Link>
              <button 
                  onClick={handleSessionReset}
                  className="text-xs font-bold bg-gray-50 text-gray-500 border border-gray-200 px-3 py-2 rounded-xl shadow-sm flex items-center space-x-1.5 hover:bg-gray-100 hover:text-gray-700 transition-colors"
@@ -564,26 +609,44 @@ function DashboardInboxContent() {
         </div>
       </div>
       
-      {/* Tombol Hapus Melayang (Floating Action) */}
+      {/* Floating Action Bar — muncul saat ada customer terseleksi */}
       {selectedIds.size > 0 && (
-         <div className="fixed bottom-12 left-1/2 transform -translate-x-1/2 bg-white pl-6 pr-3 py-3 rounded-2xl shadow-[0_15px_40px_-5px_rgba(220,38,38,0.25)] border border-red-100 flex items-center space-x-6 z-[100] animate-in slide-in-from-bottom-8 duration-300">
+         <div className="fixed bottom-12 left-1/2 transform -translate-x-1/2 bg-white pl-6 pr-3 py-3 rounded-2xl shadow-[0_15px_40px_-5px_rgba(99,102,241,0.2)] border border-indigo-100 flex items-center space-x-3 z-[100] animate-in slide-in-from-bottom-8 duration-300">
              <div className="font-bold text-gray-800 flex items-center">
-                 <span className="text-red-700 font-black px-2 py-0.5 bg-red-100/80 rounded-md mr-3">{selectedIds.size}</span>
-                 <span className="tracking-tight">Dipilih</span>
+                 <span className="text-indigo-700 font-black px-2 py-0.5 bg-indigo-100/80 rounded-md mr-3">{selectedIds.size}</span>
+                 <span className="tracking-tight text-sm">Dipilih</span>
              </div>
-             <button 
-                onClick={handleMassDelete} 
-                disabled={isDeleting} 
-                className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-xl text-sm font-bold shadow-md transition disabled:bg-red-400"
+
+             {/* Gali Ulang Massal */}
+             <button
+                onClick={handleBulkResync}
+                disabled={isBulkResyncing}
+                className="flex items-center space-x-2 bg-indigo-600 hover:bg-indigo-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow-md transition disabled:bg-indigo-400"
+                title="Gali ulang semua riwayat chat dan foto dari customer yang dipilih"
+             >
+                 {isBulkResyncing ? (
+                    <span className="w-4 h-4 border-2 border-white border-t-indigo-300 rounded-full animate-spin" />
+                 ) : (
+                    <RefreshCw size={15} />
+                 )}
+                 <span>{isBulkResyncing ? (bulkResyncProgress || 'Menggali...') : 'Gali Ulang'}</span>
+             </button>
+
+             {/* Hapus Permanen */}
+             <button
+                onClick={handleMassDelete}
+                disabled={isDeleting || isBulkResyncing}
+                className="flex items-center space-x-2 bg-red-600 hover:bg-red-700 text-white px-5 py-2.5 rounded-xl text-sm font-bold shadow-md transition disabled:bg-red-400"
              >
                  {isDeleting ? (
-                    <span className="w-5 h-5 border-2 border-white border-t-red-400 rounded-full animate-spin"></span>
+                    <span className="w-4 h-4 border-2 border-white border-t-red-300 rounded-full animate-spin" />
                  ) : (
-                    <Trash2 size={18} />
+                    <Trash2 size={15} />
                  )}
-                 <span>{isDeleting ? "MEMUSNAHKAN..." : "Hapus Permanen"}</span>
+                 <span>{isDeleting ? 'Menghapus...' : 'Hapus'}</span>
              </button>
-             <button onClick={() => setSelectedIds(new Set())} className="text-gray-400 hover:text-gray-600 transition p-2 hover:bg-gray-100 rounded-xl" title="Batalkan">
+
+             <button onClick={() => { setSelectedIds(new Set()); setBulkResyncProgress(null); }} className="text-gray-400 hover:text-gray-600 transition p-2 hover:bg-gray-100 rounded-xl" title="Batalkan">
                  ✕
              </button>
          </div>

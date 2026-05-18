@@ -246,24 +246,35 @@ db.exec(`
 // [MIGRATION] Tambah kolom baru ke tabel lama yang sudah ada di VPS
 // Kolom photo_index dan customer_phone ditambahkan di v2 — safe migration
 // updated_at ditambahkan di v3 untuk healing pass yang lebih akurat
+//
+// CATATAN KOMPATIBILITAS: SQLite < 3.38 tidak support DEFAULT (expr) di ALTER TABLE.
+// Hanya DEFAULT dengan nilai konstan (angka/string literal) yang didukung.
+// Solusi: ALTER TABLE tanpa DEFAULT, lalu UPDATE untuk isi nilai awal.
 const driveQueueMigrations = [
     { col: 'photo_index',    sql: `ALTER TABLE drive_upload_queue ADD COLUMN photo_index INTEGER DEFAULT 1` },
     { col: 'customer_phone', sql: `ALTER TABLE drive_upload_queue ADD COLUMN customer_phone TEXT` },
-    { col: 'updated_at',     sql: `ALTER TABLE drive_upload_queue ADD COLUMN updated_at TEXT DEFAULT (datetime('now'))` },
+    {
+        col: 'updated_at',
+        // [FIX] Tanpa DEFAULT expr — kompatibel semua versi SQLite
+        sql: `ALTER TABLE drive_upload_queue ADD COLUMN updated_at TEXT`,
+        // Setelah kolom ditambah, isi dengan nilai created_at untuk row lama
+        postSql: `UPDATE drive_upload_queue SET updated_at = created_at WHERE updated_at IS NULL`,
+    },
 ];
 for (const m of driveQueueMigrations) {
     try {
-        // Cek apakah kolom sudah ada
         const cols = db.prepare(`PRAGMA table_info(drive_upload_queue)`).all();
         const exists = cols.some(c => c.name === m.col);
         if (!exists) {
             db.prepare(m.sql).run();
+            if (m.postSql) db.prepare(m.postSql).run();
             console.log(`[DB] ✅ Migration: kolom '${m.col}' ditambahkan ke drive_upload_queue`);
         }
     } catch (e) {
         console.warn(`[DB] ⚠️ Migration '${m.col}' skip:`, e.message);
     }
 }
+
 
 // [INDEX] Tambah index untuk updated_at agar healing query cepat
 try {

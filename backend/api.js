@@ -486,4 +486,134 @@ router.post('/wa/reset-session', authenticateToken, (req, res) => {
     });
 });
 
+// ─── System Status — Autentikasi Terpisah ──────────────────────────────────
+// [ENTERPRISE] Halaman System Status dilindungi oleh kredensial tersendiri
+// yang berbeda dari akun admin biasa. Konfigurasi di .env:
+//   STATUS_USERNAME=monitor
+//   STATUS_PASSWORD=password_rahasia_kuat
+//
+// Menggunakan token STATUS_JWT yang hanya valid untuk endpoint system-status.
+// ─────────────────────────────────────────────────────────────────────────────
+const STATUS_USERNAME = process.env.STATUS_USERNAME || 'monitor';
+const STATUS_PASSWORD = process.env.STATUS_PASSWORD || 'status@crm2026';
+const STATUS_JWT_SECRET = process.env.STATUS_JWT_SECRET || (JWT_SECRET + '_status_only');
+
+if (!process.env.STATUS_USERNAME || !process.env.STATUS_PASSWORD) {
+    console.warn('⚠️ [SECURITY] STATUS_USERNAME / STATUS_PASSWORD belum diset di .env — menggunakan default!');
+}
+
+// Middleware khusus untuk status token
+const authenticateStatusToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = (authHeader && authHeader.split(' ')[1]) || req.query.status_token;
+    if (!token) return res.status(401).json({ error: 'Status token diperlukan.' });
+    jwt.verify(token, STATUS_JWT_SECRET, (err, decoded) => {
+        if (err || decoded.role !== 'status_viewer') return res.status(403).json({ error: 'Token status tidak valid atau kadaluarsa.' });
+        next();
+    });
+};
+
+// POST /status-login — Login khusus halaman status (tidak butuh JWT admin)
+router.post('/status-login', (req, res) => {
+    const { username, password } = req.body;
+    if (username === STATUS_USERNAME && password === STATUS_PASSWORD) {
+        // Token berlaku 8 jam (shift kerja 1 hari)
+        const token = jwt.sign({ role: 'status_viewer' }, STATUS_JWT_SECRET, { expiresIn: '8h' });
+        res.json({ success: true, token });
+    } else {
+        res.status(401).json({ error: 'Username atau password salah.' });
+    }
+});
+
+// GET /system-status — Data komprehensif untuk halaman monitoring
+router.get('/system-status', authenticateStatusToken, (req, res) => {
+    try {
+        // WA Connection Status
+        const waStatus = {
+            connected: global.waConnected === true,
+            qrPending: global.waQrPending === true,
+            label: global.waConnected ? 'Connected' : (global.waQrPending ? 'Waiting QR Scan' : 'Disconnected'),
+        };
+
+        // Drive Queue Stats
+        const driveRaw = db.prepare(
+            `SELECT status, COUNT(*) as count FROM drive_upload_queue GROUP BY status`
+        ).all();
+        const driveStats = { PENDING: 0, WAITING_RESI: 0, UPLOADING: 0, DONE: 0, FAILED: 0 };
+        for (const row of driveRaw) { driveStats[row.status] = row.count; }
+        driveStats.total = Object.values(driveStats).reduce((a, b) => a + b, 0);
+
+        // Last successful Drive upload
+        const lastDone = db.prepare(
+            `SELECT updated_at FROM drive_upload_queue WHERE status = 'DONE' ORDER BY updated_at DESC LIMIT 1`
+        ).get();
+
+        // DB Stats
+        const totalCustomers = db.prepare('SELECT COUNT(*) as c FROM customers').get().c;
+        const totalMedia     = db.prepare('SELECT COUNT(*) as c FROM media').get().c;
+        const totalMessages  = db.prepare('SELECT COUNT(*) as c FROM messages').get().c;
+
+        // Pending Orders queue
+        const pendingOrders = db.prepare(
+            `SELECT COUNT(*) as c FROM pending_orders WHERE status = 'PENDING'`
+        ).get().c;
+
+        // Outgoing queue depth (pesan bot yang belum terkirim)
+        let outgoingDepth = 0;
+        try {
+            outgoingDepth = db.prepare(
+                `SELECT COUNT(*) as c FROM outgoing_queue WHERE status = 'PENDING'`
+            ).get().c;
+        } catch (e) { /* tabel mungkin tidak ada */ }
+
+        // Uptime
+        const uptimeMs   = Date.now() - (global.serverStartTime || Date.now());
+        const uptimeSecs = Math.floor(uptimeMs / 1000);
+        const uptimeHuman = Math.floor(uptimeSecs / 3600) + 'j ' +
+                            Math.floor((uptimeSecs % 3600) / 60) + 'm ' +
+                            (uptimeSecs % 60) + 'd';
+
+        // Overall health score
+        let healthIssues = [];
+        if (!waStatus.connected && !waStatus.qrPending) healthIssues.push('WA Disconnected');
+        if (driveStats.FAILED > 5) healthIssues.push(driveStats.FAILED + ' foto gagal upload Drive');
+        if (driveStats.PENDING > 100) healthIssues.push(driveStats.PENDING + ' foto pending Drive');
+        if (pendingOrders > 20) healthIssues.push(pendingOrders + ' order pending lookup');
+
+        const overallStatus = healthIssues.length === 0 ? 'ok'
+                            : healthIssues.length <= 2 ? 'degraded'
+                            : 'error';
+
+        res.json({
+            success: true,
+            timestamp: new Date().toISOString(),
+            overall: overallStatus,
+            issues: healthIssues,
+            wa: waStatus,
+            drive: {
+                ...driveStats,
+                lastUploadAt: lastDone ? lastDone.updated_at : null,
+            },
+            database: {
+                customers: totalCustomers,
+                media: totalMedia,
+                messages: totalMessages,
+            },
+            queues: {
+                pendingOrders,
+                outgoingMessages: outgoingDepth,
+            },
+            server: {
+                uptimeMs,
+                uptimeHuman,
+                nodeVersion: process.version,
+                memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+            },
+        });
+    } catch (e) {
+        console.error('[SYSTEM-STATUS] ❌ Error:', e.message);
+        res.status(500).json({ error: 'Gagal mengambil system status: ' + e.message });
+    }
+});
+
 module.exports = { router, authenticateToken };

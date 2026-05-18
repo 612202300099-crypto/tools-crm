@@ -813,6 +813,8 @@ client.on('qr', (qr) => {
     if (initializationTimer) clearTimeout(initializationTimer); // Jangan restart jika sedang tunggu QR
     qrCodeData = qr;
     isConnected = false;
+    global.waConnected = false;
+    global.waQrPending = true;
     console.log('New QR code generated - please scan');
     // Print QR ke terminal agar bisa scan langsung dari SSH
     try { qrcode.generate(qr, { small: true }); } catch (e) { }
@@ -823,6 +825,8 @@ client.on('ready', async () => {
     console.log('✅ WhatsApp Client is ready!');
     isConnected = true;
     qrCodeData = '';
+    global.waConnected = true;
+    global.waQrPending = false;
 
     stability.start();
     await hydrateContactCache();
@@ -926,6 +930,7 @@ client.on('ready', async () => {
 client.on('disconnected', async (reason) => {
     console.log(`[WA] ⚠️ WhatsApp Client disconnected: ${reason}`);
     isConnected = false;
+    global.waConnected = false;
     stability.stop();
 
     // Jika LOGOUT (bukan sekedar disconnect jaringan), session sudah mati di server WA
@@ -1553,13 +1558,69 @@ app.post('/api/wa/resync', async (req, res) => {
                         console.log(`[RESYNC] ⚠️ Gagal membuka chat di UI, lanjut tarik apa adanya.`);
                     }
 
-                    // Setelah dipaksa load via DOM, tarik semua pesan ke Node.js
-                    console.log(`[RESYNC] 📥 Mengambil semua pesan yang berhasil dimuat...`);
-                    const allMessagesForTarget = await chromeSemaphore.acquire('API:resync_fetchMsg', () => {
-                        return withTimeout(chat.fetchMessages({ limit: 1500 }), 60000, 'fetchMessages_after_dom_scroll');
+                    // ─────────────────────────────────────────────────────────────────
+                    // [F2-FEAT3] DEEP PAGINATION — loadEarlierMessages() Loop
+                    // Untuk customer dengan 1000+ foto, fetchMessages({ limit: 1500 })
+                    // tidak cukup. loadEarlierMessages() scroll ke atas dan memuat lebih banyak.
+                    // MAX_ITER=40 → bisa tangkap hingga ~2000-4000 pesan per chat.
+                    // ─────────────────────────────────────────────────────────────────
+                    console.log('[RESYNC] 📥 Mengambil pesan awal (100 terakhir)...');
+                    let allMessagesForTarget = await chromeSemaphore.acquire('API:resync_fetchInit', () => {
+                        return withTimeout(chat.fetchMessages({ limit: 100 }), 60000, 'fetchMessages_init');
                     }, { priority: 2, timeout: 90000 });
 
-                    console.log(`[RESYNC] 📊 Total dari ${targetChatId}: ${allMessagesForTarget.length} pesan`);
+                    let prevCount = allMessagesForTarget.length;
+                    const MAX_ITER = 40; // 40 iterasi × ~50-100 pesan = 2000-4000 pesan
+                    let deepIter = 0;
+
+                    emitProgress('resync_progress', { phone_number, message: 'Menggali pesan-pesan lama (Deep Pagination)...' });
+
+                    while (deepIter < MAX_ITER) {
+                        deepIter++;
+                        try {
+                            // Muat pesan lebih lama dari WA server
+                            const hasMore = await chromeSemaphore.acquire('API:resync_loadEarlier', () => {
+                                return withTimeout(chat.loadEarlierMessages(), 25000, 'loadEarlier_' + deepIter);
+                            }, { priority: 2, timeout: 35000 });
+
+                            // Tunggu WA selesai render pesan baru
+                            await new Promise(r => setTimeout(r, 1200));
+
+                            // Ambil semua pesan yang sekarang tersedia di memori WA
+                            const refreshed = await chromeSemaphore.acquire('API:resync_refresh', () => {
+                                return withTimeout(chat.fetchMessages({ limit: 8000 }), 90000, 'fetchMessages_refresh_' + deepIter);
+                            }, { priority: 2, timeout: 120000 });
+
+                            const newFound = refreshed.length - prevCount;
+
+                            if (newFound > 0) {
+                                allMessagesForTarget = refreshed;
+                                prevCount = refreshed.length;
+                                emitProgress('resync_progress', {
+                                    phone_number,
+                                    message: 'Iterasi ' + deepIter + ': ' + refreshed.length + ' pesan total (+' + newFound + ' baru)'
+                                });
+                            }
+
+                            // Berhenti jika tidak ada pesan baru atau WA bilang tidak ada lagi
+                            if (!hasMore || newFound === 0) {
+                                console.log('[RESYNC] 🏁 Deep pagination selesai di iterasi ' + deepIter + ': ' + allMessagesForTarget.length + ' pesan total.');
+                                break;
+                            }
+
+                            await new Promise(r => setTimeout(r, 600)); // Jeda antar iterasi
+                        } catch (loadErr) {
+                            console.warn('[RESYNC] ⚠️ loadEarlier iterasi ' + deepIter + ' gagal:', loadErr.message);
+                            break; // Stop gracefully jika error
+                        }
+                    }
+
+                    if (deepIter >= MAX_ITER) {
+                        console.log('[RESYNC] ⚠️ Mencapai batas iterasi (' + MAX_ITER + 'x). Total: ' + allMessagesForTarget.length + ' pesan. Ada kemungkinan pesan lebih lama belum terbaca.');
+                        emitProgress('resync_progress', { phone_number, message: 'Catatan: Batas iterasi tercapai. Pesan sangat lama mungkin tidak terbaca semua.' });
+                    }
+
+                    console.log('[RESYNC] 📊 Total dari ' + targetChatId + ': ' + allMessagesForTarget.length + ' pesan (setelah ' + deepIter + ' iterasi deep pagination)');
 
                     // Build cached context SEKALI saja sebelum loop pemrosesan
                     let cachedContext = null;
@@ -1721,6 +1782,113 @@ app.post('/api/wa/resync', async (req, res) => {
     });
 });
 
+
+
+
+// ─── Bulk Resync (Gali Ulang Massal dari Dashboard) ──────────────────────────
+// [F3-FEAT3] Proses sequential untuk max 20 customer sekaligus.
+// Setiap customer diresync menggunakan logika yang sama dengan resync individual.
+// Emits: bulk_resync_progress, bulk_resync_done via Socket.IO
+app.post('/api/wa/bulk-resync', async (req, res) => {
+    const { customer_ids } = req.body;
+
+    if (!customer_ids || !Array.isArray(customer_ids) || customer_ids.length === 0) {
+        return res.status(400).json({ error: 'customer_ids (array) diperlukan.' });
+    }
+    if (customer_ids.length > 20) {
+        return res.status(400).json({ error: 'Maksimal 20 customer per batch. Kurangi pilihan Anda.' });
+    }
+    if (!isConnected) {
+        return res.status(503).json({ error: 'WhatsApp belum konek. Tunggu WA terhubung dulu.' });
+    }
+
+    // Ambil data customer dari DB
+    const customers = [];
+    for (const cid of customer_ids) {
+        const c = db.prepare('SELECT * FROM customers WHERE id = ?').get(cid);
+        if (c) customers.push(c);
+    }
+
+    if (customers.length === 0) {
+        return res.status(404).json({ error: 'Customer tidak ditemukan di database.' });
+    }
+
+    // Respons langsung — proses di background
+    res.json({
+        success: true,
+        message: 'Gali Ulang Massal dimulai untuk ' + customers.length + ' customer. Progress akan tampil real-time di dashboard.',
+        count: customers.length
+    });
+
+    setImmediate(async () => {
+        const emitBulk = (event, data) => {
+            try { if (global._io) global._io.emit(event, data); } catch (e) {}
+        };
+
+        emitBulk('bulk_resync_started', { total: customers.length, customer_ids });
+        console.log('[BULK-RESYNC] 🔄 Memulai Gali Ulang Massal untuk ' + customers.length + ' customer...');
+
+        let done = 0;
+        let totalMedia = 0;
+
+        for (const customer of customers) {
+            try {
+                emitBulk('bulk_resync_progress', {
+                    current: done + 1,
+                    total: customers.length,
+                    customer_id: customer.id,
+                    phone_number: customer.phone_number,
+                    name: customer.name,
+                    message: 'Menggali ulang: ' + (customer.name || customer.phone_number) + ' (' + (done + 1) + '/' + customers.length + ')'
+                });
+
+                // Trigger resync untuk customer ini via internal HTTP call (reuse logic)
+                const resyncUrl = 'http://localhost:' + (process.env.PORT || 3001) + '/api/wa/resync';
+                const http = require('http');
+                const payload = JSON.stringify({ phone_number: customer.phone_number, customer_id: customer.id });
+
+                await new Promise((resolve) => {
+                    const reqHttp = http.request(resyncUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) }
+                    }, (httpRes) => {
+                        httpRes.resume();
+                        httpRes.on('end', resolve);
+                    });
+                    reqHttp.on('error', resolve); // non-fatal
+                    reqHttp.write(payload);
+                    reqHttp.end();
+                });
+
+                // Tunggu resync selesai via event (max 5 menit per customer)
+                await new Promise((resolve) => {
+                    const timeout = setTimeout(resolve, 5 * 60 * 1000); // 5 menit timeout
+                    const handler = (data) => {
+                        if (data.phone_number === customer.phone_number || data.customer_id === customer.id) {
+                            clearTimeout(timeout);
+                            if (data.totalMedia) totalMedia += (data.totalMedia || 0);
+                            if (global._io) global._io.off('resync_done', handler);
+                            resolve();
+                        }
+                    };
+                    if (global._io) global._io.on('resync_done', handler);
+                    else setTimeout(resolve, 30000); // fallback jika socket tidak ada
+                });
+
+                done++;
+                await new Promise(r => setTimeout(r, 2000)); // Jeda 2 detik antar customer
+
+            } catch (err) {
+                console.warn('[BULK-RESYNC] ⚠️ Skip ' + customer.phone_number + ': ' + err.message);
+                done++;
+            }
+        }
+
+        const summary = 'Gali Ulang Massal selesai! ' + done + '/' + customers.length + ' customer diproses, ' + totalMedia + ' media ditemukan.';
+        console.log('[BULK-RESYNC] 🏆 ' + summary);
+        emitBulk('bulk_resync_done', { total: customers.length, done, totalMedia, message: summary });
+    });
+});
 
 app.post('/api/wa/global-sweep', async (req, res) => {
     res.json({ success: true, message: 'Global Sweep dimulai di latar belakang. Proses ini akan menyisir semua chat aktif dan menarik foto yang terlewat.' });
@@ -2087,6 +2255,10 @@ io.on('connection', (socket) => {
         // silent disconnect — normal saat browser refresh
     });
 });
+
+global.serverStartTime = Date.now();
+global.waConnected = false;
+global.waQrPending = false;
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`Backend WA Engine & API running on port ${PORT}`);
