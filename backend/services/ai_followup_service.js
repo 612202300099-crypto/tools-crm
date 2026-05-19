@@ -660,37 +660,39 @@ async function checkAndRespond(waClient, customer, message, supabase) {
 
         const msgText = (message.body || '').trim();
 
-        // ── FASE A: Customer belum punya nomor pesanan ─────────────────────────
-        if (!customer.order_id) {
-            const foundOrderId = detectOrderId(msgText);
+        // ── FASE A: Deteksi Nomor Pesanan (selalu cek di setiap pesan masuk) ──────
+        // [FIX KRITIS] Tidak lagi dibatasi oleh !customer.order_id.
+        // Sebelumnya: hanya deteksi jika belum ada order_id → miss ketika customer
+        //             kirim ulang nomor pesanan yang berbeda / salah tulis sebelumnya.
+        // Sekarang: selalu cek, proses jika nomor baru & berbeda dari yang sudah ada.
+        const foundOrderId = detectOrderId(msgText);
 
-            if (foundOrderId) {
-                // [CRITICAL FIX] Deteksi nomor pesanan SELALU diproses ke spreadsheet
-                // TIDAK bergantung pada is_enabled. Customer yang kirim nomor pesanan
-                // WAJIB mendapat balasan detail, apapun kondisi bot.
-                console.log(`[AI-BOT] 🔢 Nomor pesanan ditemukan: ${foundOrderId} dari ${customer.phone_number}`);
+        if (foundOrderId && foundOrderId !== customer.order_id) {
+            console.log(`[AI-BOT] 🔢 Nomor pesanan ditemukan/diperbarui: ${foundOrderId} dari ${customer.phone_number} (sebelumnya: ${customer.order_id || 'kosong'})`);
 
-                // Simpan order_id dulu ke DB agar tidak diproses duplikat
-                await supabase.from('customers').update({ order_id: foundOrderId }).eq('id', customer.id);
+            // Simpan order_id ke DB
+            await supabase.from('customers').update({ order_id: foundOrderId }).eq('id', customer.id);
 
-                // Lookup ke spreadsheet (tidak perlu API key Sheets jika belum diisi = return null)
-                const orderResult = await lookupOrder(foundOrderId);
+            // Lookup ke spreadsheet
+            const orderResult = await lookupOrder(foundOrderId);
 
-                if (!orderResult) {
-                    await handleOrderNotFound(waClient, customer, foundOrderId, supabase);
-                    return;
-                }
-
-                if (orderResult.cancelled) {
-                    await handleOrderCancelled(waClient, customer, orderResult, supabase);
-                    return;
-                }
-
-                await handleOrderFound(waClient, customer, orderResult, supabase);
+            if (!orderResult) {
+                await handleOrderNotFound(waClient, customer, foundOrderId, supabase);
                 return;
             }
 
-            // Tidak ada nomor pesanan → cek apakah bot aktif sebelum balas
+            if (orderResult.cancelled) {
+                await handleOrderCancelled(waClient, customer, orderResult, supabase);
+                return;
+            }
+
+            await handleOrderFound(waClient, customer, orderResult, supabase);
+            return;
+        }
+
+        // Tidak ada nomor pesanan baru di pesan ini
+        // → cek apakah bot perlu balas (hanya jika belum punya order_id sama sekali)
+        if (!customer.order_id) {
             const config = await getCachedAiConfig(supabase);
 
             // [BEST PRACTICE] is_enabled hanya mengontrol "apakah bot mengejar customer"

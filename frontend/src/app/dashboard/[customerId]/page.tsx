@@ -653,28 +653,15 @@ export default function ChatDetail() {
             ))}
           </div>
 
-          <div className="p-4 bg-white border-t space-y-3">
-             <div className="flex space-x-2 overflow-x-auto pb-2 scrollbar-hide">
-                 <button onClick={() => sendQuickReply("Halo kak, untuk orderan ini jumlah fotonya masih kurang 10 ya.")} className="whitespace-nowrap px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-medium rounded-full hover:bg-gray-200 transition border">Kurang foto</button>
-                 <button onClick={() => sendQuickReply("Foto telah kami rekap dan siap dicetak! Estimasi pengerjaan 1-2 hari.")} className="whitespace-nowrap px-3 py-1.5 bg-gray-100 text-gray-700 text-xs font-medium rounded-full hover:bg-gray-200 transition border">Siap Cetak</button>
-             </div>
-             <div className="flex relative items-center">
-                 <input 
-                    type="text" 
-                    value={replyText}
-                    onChange={(e) => setReplyText(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && sendQuickReply()}
-                    placeholder="Ketik balasan..."
-                    className="w-full pl-4 pr-12 py-3 border border-gray-300 rounded-xl focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
-                 />
-                 <button 
-                    disabled={isSending || !replyText.trim()}
-                    onClick={() => sendQuickReply()}
-                    className="absolute right-2 p-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-gray-300 transition"
-                 >
-                    <Send size={16} />
-                 </button>
-             </div>
+          {/* ── SILENT MODE: Reply dinonaktifkan sementara ── */}
+          <div className="p-4 bg-amber-50 border-t border-amber-200">
+            <div className="flex items-center gap-2 bg-amber-100 border border-amber-300 rounded-xl px-4 py-3">
+              <span className="text-lg">🤫</span>
+              <div>
+                <p className="text-xs font-black text-amber-800">Mode Diam Aktif</p>
+                <p className="text-[10px] text-amber-600 mt-0.5">Balasan dari web &amp; bot dinonaktifkan sementara. Sistem tetap mencatat semua chat &amp; nomor pesanan masuk secara otomatis.</p>
+              </div>
+            </div>
           </div>
         </div>
 

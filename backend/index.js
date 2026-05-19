@@ -597,8 +597,15 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
         // Lebih baik punya data "Nomor Aneh" daripada pesanan/foto customer hilang sama sekali.
         if (isLidNetwork && customerPhoneNumber === String(chat.id.user).replace(/\D/g, '')) {
             if (!message.hasMedia) {
-                console.log(`[DEBUG] 🛑 [BLOCK] Mengabaikan teks LID tanpa media: ${customerPhoneNumber}`);
-                return;
+                // [FIX ORDER-DETECTION] Jika ada nomor pesanan di teks, jangan blok
+                // Mengatasi: customer kirim nomor pesanan lewat jaringan LID WA baru
+                const { detectOrderId: _detectLid } = require('./utils/orderIdUtils');
+                const _lidOrderId = _detectLid(message.body || '');
+                if (!_lidOrderId) {
+                    console.log(`[DEBUG] 🛑 [BLOCK] Teks LID tanpa nomor pesanan: ${customerPhoneNumber}`);
+                    return;
+                }
+                console.log(`[DEBUG] ✅ [ALLOW-LID-ORDER] Teks LID berisi nomor pesanan ${_lidOrderId} — diloloskan.`);
             }
             console.log(`[DEBUG] ⚠️ [ALLOW-BY-MEDIA] Meloloskan LID ${customerPhoneNumber} karena memiliki media penting.`);
         }

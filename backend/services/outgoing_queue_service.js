@@ -95,6 +95,13 @@ class OutgoingMessageQueue {
      * @returns {Promise<void>}  - resolve saat pesan berhasil dikirim
      */
     enqueue(waClient, phone, message) {
+        // [SILENT_MODE] Jika aktif, tolak SEMUA pesan keluar (bot + manual)
+        // Aktifkan di VPS: tambahkan SILENT_MODE=true di .env
+        if (process.env.SILENT_MODE === 'true') {
+            console.log(`[OUT-QUEUE] 🤫 SILENT_MODE: Pesan ke ${phone} diblokir (tidak dikirim ke WA).`);
+            return Promise.resolve(); // resolve kosong — tidak throw, tidak crash alur
+        }
+
         if (this._queue.length >= CFG.MAX_QUEUE_SIZE) {
             console.warn(`[OUT-QUEUE] ⚠️ Antrean penuh (${CFG.MAX_QUEUE_SIZE}). Pesan ke ${phone} dibuang.`);
             return Promise.reject(new Error('QUEUE_FULL'));
