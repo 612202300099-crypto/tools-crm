@@ -302,25 +302,175 @@ router.get('/customers/:id/drive-status', authenticateToken, (req, res) => {
     }
 });
 
-// Endpoint Server-Side ZIP: Mengunduh foto dengan kecepatan tinggi tanpa membebani browser
+// ─── HELPER: Core ZIP Builder (digunakan oleh GET dan POST) ─────────────────
+async function buildAndStreamZip(res, customer, mediaList) {
+    if (mediaList.length === 0) return res.status(404).json({ error: 'Tidak ada foto yang valid untuk didownload' });
+
+    const orderName = customer.order_id || customer.phone_number || 'Pesanan';
+    const zipFilename = `${orderName}.zip`;
+
+    res.attachment(zipFilename);
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Transfer-Encoding', 'chunked');
+
+    const archive = archiver('zip', { zlib: { level: 1 } });
+
+    archive.on('error', (err) => {
+        console.error('[API] Archiver error:', err.message);
+        if (!res.headersSent) res.status(500).end();
+    });
+
+    archive.pipe(res);
+
+    // [TURBO] Parallel Download Pool — Download 15 foto sekaligus
+    const MAX_CONCURRENT = 15;
+    let index = 0;
+    const objectStorage = require('./services/object_storage_service');
+
+    const worker = async () => {
+        while (index < mediaList.length) {
+            const i = index++;
+            const media = mediaList[i];
+            
+            const rawExt = (media.file_url || '').split('.').pop().split('?')[0];
+            const ext = ['jpg','jpeg','png','webp','heic','gif','mp4'].includes(rawExt?.toLowerCase()) ? rawExt : 'jpg';
+            const fileName = `foto_${String(i + 1).padStart(4, '0')}.${ext}`;
+
+            try {
+                let buffer;
+                if (media.storage_type === 'object') {
+                    // Jalur dalam (Direct S3 Buffer) — Anti 403 & Cepat
+                    const storageKey = media.storage_key || (media.file_url ? media.file_url.split('/').pop() : null);
+                    buffer = await objectStorage.getMediaBuffer(storageKey, 'object');
+                } else {
+                    // Jalur lokal
+                    let localPath = null;
+                    const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
+                    if (media.file_url && media.file_url.startsWith(publicUrl)) {
+                        const relativePath = media.file_url.replace(publicUrl, '').replace(/^\//, '');
+                        localPath = path.join(__dirname, relativePath);
+                    } else if (media.file_name) {
+                        localPath = path.join(__dirname, 'uploads', media.file_name);
+                    }
+                    
+                    if (localPath && fs.existsSync(localPath)) {
+                        buffer = fs.readFileSync(localPath);
+                    }
+                }
+
+                if (buffer) {
+                    archive.append(buffer, { name: fileName });
+                }
+            } catch (err) {
+                console.error(`[ZIP] Gagal ambil file ${media.id}:`, err.message);
+            }
+        }
+    };
+
+    // Jalankan pool workers
+    const workers = [];
+    for (let i = 0; i < Math.min(MAX_CONCURRENT, mediaList.length); i++) {
+        workers.push(worker());
+    }
+
+    await Promise.all(workers);
+    await archive.finalize();
+    console.log(`[ZIP] ✅ Berhasil buat ZIP ${zipFilename} (${mediaList.length} foto)`);
+}
+
+// ─── HELPER: Download Cache untuk Native Streaming tanpa limit URL 414 ───────
+const zipDownloadCache = new Map();
+
+router.post('/customers/:id/fast-zip-token', authenticateToken, (req, res) => {
+    const downloadId = Date.now().toString() + Math.random().toString(36).substring(7);
+    zipDownloadCache.set(downloadId, req.body.mediaIds || []);
+    // Bersihkan cache setelah 5 menit
+    setTimeout(() => zipDownloadCache.delete(downloadId), 5 * 60 * 1000);
+    res.json({ downloadId });
+});
+
+// ─── [FIX 414] POST /customers/:id/fast-zip ──────────────────────────────────
+// SOLUSI UTAMA: mediaIds dikirim lewat body JSON, bukan URL query string.
+// Ini mencegah error "414 Request-URI Too Large" dari Nginx ketika
+// jumlah foto sangat banyak (ratusan UUID × 36 karakter = URL > 8KB).
+router.post('/customers/:id/fast-zip', async (req, res) => {
+    try {
+        // Auth: cek token dari header Authorization (Bearer) ATAU dari query ?token=
+        const authHeader = req.headers['authorization'];
+        const tokenFromHeader = authHeader && authHeader.split(' ')[1];
+        const tokenFromQuery = req.query.token;
+        const token = tokenFromHeader || tokenFromQuery;
+
+        if (!token) return res.sendStatus(401);
+
+        const jwt = require('jsonwebtoken');
+        const JWT_SECRET = process.env.JWT_SECRET || 'crm-super-secret-key-2026';
+        try {
+            jwt.verify(token, JWT_SECRET);
+        } catch (e) {
+            return res.sendStatus(403);
+        }
+
+        const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
+        if (!customer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
+
+        let mediaList = [];
+        // mediaIds dari body JSON (solusi utama)
+        const mediaIds = req.body?.mediaIds;
+        if (Array.isArray(mediaIds) && mediaIds.length > 0) {
+            const ids = mediaIds.filter(Boolean);
+            const placeholders = ids.map(() => '?').join(',');
+            mediaList = db.prepare(`
+                SELECT * FROM media
+                WHERE customer_id = ?
+                  AND id IN (${placeholders})
+                  AND COALESCE(excluded_from_production, 0) = 0
+                ORDER BY created_at ASC
+            `).all(req.params.id, ...ids);
+        } else {
+            // Jika tidak ada mediaIds → download semua foto produksi
+            mediaList = db.prepare(`
+                SELECT * FROM media
+                WHERE customer_id = ?
+                  AND COALESCE(excluded_from_production, 0) = 0
+                ORDER BY created_at ASC
+            `).all(req.params.id);
+        }
+
+        await buildAndStreamZip(res, customer, mediaList);
+    } catch (err) {
+        console.error('[API] Error fast-zip POST:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
+    }
+});
+
+// ─── GET /customers/:id/fast-zip (Backward-compat, tanpa filter mediaIds) ────
+// GET tetap ada untuk kasus sederhana (download semua foto tanpa filter).
+// Jangan kirim ratusan mediaIds lewat sini — gunakan POST di atas.
 router.get('/customers/:id/fast-zip', async (req, res) => {
     try {
         const customer = db.prepare('SELECT * FROM customers WHERE id = ?').get(req.params.id);
         if (!customer) return res.status(404).json({ error: 'Customer tidak ditemukan' });
 
         let mediaList = [];
-        if (req.query.mediaIds) {
-            const ids = req.query.mediaIds.split(',').filter(Boolean);
-            if (ids.length > 0) {
-                const placeholders = ids.map(() => '?').join(',');
-                mediaList = db.prepare(`
-                    SELECT * FROM media
-                    WHERE customer_id = ?
-                      AND id IN (${placeholders})
-                      AND COALESCE(excluded_from_production, 0) = 0
-                    ORDER BY created_at ASC
-                `).all(req.params.id, ...ids);
-            }
+        
+        // Ambil ids dari query string ATAU dari cache downloadId
+        let ids = [];
+        if (req.query.downloadId && zipDownloadCache.has(req.query.downloadId)) {
+            ids = zipDownloadCache.get(req.query.downloadId);
+        } else if (req.query.mediaIds) {
+            ids = req.query.mediaIds.split(',').filter(Boolean);
+        }
+
+        if (ids && ids.length > 0) {
+            const placeholders = ids.map(() => '?').join(',');
+            mediaList = db.prepare(`
+                SELECT * FROM media
+                WHERE customer_id = ?
+                  AND id IN (${placeholders})
+                  AND COALESCE(excluded_from_production, 0) = 0
+                ORDER BY created_at ASC
+            `).all(req.params.id, ...ids);
         } else {
             mediaList = db.prepare(`
                 SELECT * FROM media
@@ -330,87 +480,10 @@ router.get('/customers/:id/fast-zip', async (req, res) => {
             `).all(req.params.id);
         }
 
-        if (mediaList.length === 0) return res.status(404).json({ error: 'Tidak ada foto yang valid untuk didownload' });
-
-        const orderName = customer.order_id || customer.phone_number || 'Pesanan';
-        const zipFilename = `${orderName}.zip`;
-
-        res.attachment(zipFilename);
-        res.setHeader('Content-Type', 'application/zip');
-        res.setHeader('Transfer-Encoding', 'chunked');
-
-        const archive = archiver('zip', {
-            zlib: { level: 1 } // Low compression = High speed
-        });
-
-        archive.on('error', (err) => {
-            console.error('[API] Archiver error:', err.message);
-            if (!res.headersSent) res.status(500).end();
-        });
-
-        // Pipe archive stream langsung ke response HTTP (Streaming)
-        archive.pipe(res);
-
-        // [TURBO] Parallel Download Pool — Download 15 foto sekaligus
-        const MAX_CONCURRENT = 15;
-        let index = 0;
-        const objectStorage = require('./services/object_storage_service');
-
-        const worker = async () => {
-            while (index < mediaList.length) {
-                const i = index++;
-                const media = mediaList[i];
-                
-                const rawExt = (media.file_url || '').split('.').pop().split('?')[0];
-                const ext = ['jpg','jpeg','png','webp','heic','gif','mp4'].includes(rawExt?.toLowerCase()) ? rawExt : 'jpg';
-                const fileName = `foto_${String(i + 1).padStart(4, '0')}.${ext}`;
-
-                try {
-                    let buffer;
-                    if (media.storage_type === 'object') {
-                        // Jalur dalam (Direct S3 Buffer) — Anti 403 & Cepat
-                        const storageKey = media.storage_key || (media.file_url ? media.file_url.split('/').pop() : null);
-                        buffer = await objectStorage.getMediaBuffer(storageKey, 'object');
-                    } else {
-                        // Jalur lokal
-                        let localPath = null;
-                        const publicUrl = process.env.PUBLIC_API_URL || 'https://api.kirimfoto.com';
-                        if (media.file_url && media.file_url.startsWith(publicUrl)) {
-                            const relativePath = media.file_url.replace(publicUrl, '').replace(/^\//, '');
-                            localPath = path.join(__dirname, relativePath);
-                        } else if (media.file_name) {
-                            localPath = path.join(__dirname, 'uploads', media.file_name);
-                        }
-                        
-                        if (localPath && fs.existsSync(localPath)) {
-                            buffer = fs.readFileSync(localPath);
-                        }
-                    }
-
-                    if (buffer) {
-                        archive.append(buffer, { name: fileName });
-                    }
-                } catch (err) {
-                    console.error(`[ZIP] Gagal ambil file ${media.id}:`, err.message);
-                }
-            }
-        };
-
-        // Jalankan pool workers
-        const workers = [];
-        for (let i = 0; i < Math.min(MAX_CONCURRENT, mediaList.length); i++) {
-            workers.push(worker());
-        }
-
-        await Promise.all(workers);
-        await archive.finalize();
-        console.log(`[ZIP] ✅ Berhasil buat ZIP ${zipFilename} (${mediaList.length} foto)`);
-
+        await buildAndStreamZip(res, customer, mediaList);
     } catch (err) {
-        console.error('[API] Error fast-zip:', err.message);
-        if (!res.headersSent) {
-            res.status(500).json({ error: err.message });
-        }
+        console.error('[API] Error fast-zip GET:', err.message);
+        if (!res.headersSent) res.status(500).json({ error: err.message });
     }
 });
 

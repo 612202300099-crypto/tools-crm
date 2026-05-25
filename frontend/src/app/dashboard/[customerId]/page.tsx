@@ -574,12 +574,41 @@ export default function ChatDetail() {
        return;
     }
 
-    // [TURBO] Gunakan Native Download (Streaming) — Agar RAM browser tidak meledak saat download 1000+ foto
-    const mediaParam = selectedMedia.size > 0 ? `&mediaIds=${productionIds.join(',')}` : '';
-    const downloadUrl = `${WA_API_URL}/api/local/customers/${customerId}/fast-zip?token=${token}${mediaParam}`;
-    
-    // Trigger download langsung via browser (Native Stream)
-    window.location.href = downloadUrl;
+    setLoadingMedia(true);
+    try {
+        const orderName = customer?.order_id ? customer.order_id.trim() : customer?.phone_number;
+
+        // [TURBO + FIX 414] Ambil downloadId via POST (tanpa limit ukuran mediaIds)
+        const bodyPayload: { mediaIds?: string[] } = {};
+        if (selectedMedia.size > 0) {
+            bodyPayload.mediaIds = productionIds;
+        }
+
+        const tokenResponse = await fetch(`${WA_API_URL}/api/local/customers/${customerId}/fast-zip-token`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(bodyPayload),
+        });
+
+        if (!tokenResponse.ok) {
+            const err = await tokenResponse.json().catch(() => ({}));
+            throw new Error(err.error || `Server error HTTP ${tokenResponse.status}`);
+        }
+
+        const { downloadId } = await tokenResponse.json();
+
+        // Trigger native download (Streaming) — RAM tidak akan meledak!
+        window.location.href = `${WA_API_URL}/api/local/customers/${customerId}/fast-zip?token=${token}&downloadId=${downloadId}`;
+
+    } catch (error: any) {
+        console.error('[ZIP]', error);
+        alert(`Gagal membuat ZIP: ${error.message}\n\nTips: Coba Download Zip lagi — jika masih gagal, kurangi jumlah foto yang dipilih.`);
+    } finally {
+        setLoadingMedia(false);
+    }
   };
 
   const sendQuickReply = async (templateText?: string) => {
