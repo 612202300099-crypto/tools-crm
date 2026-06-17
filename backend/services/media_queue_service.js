@@ -11,7 +11,9 @@ function getSharp() {
     if (_sharp !== null) return _sharp;
     try {
         _sharp = require('sharp');
-        console.log('[MEDIA-QUEUE] 🖼️ Sharp image processor siap (kompresi aktif).');
+        // [MEMORY OPTIMIZATION] Matikan cache internal sharp untuk mencegah memory leak yang bisa membuat PM2 restart (1.5GB limit)
+        _sharp.cache(false);
+        console.log('[MEDIA-QUEUE] 🖼️ Sharp image processor siap (kompresi aktif, cache OFF).');
     } catch (e) {
         _sharp = false; // false = sudah dicek tapi tidak ada
         console.warn('[MEDIA-QUEUE] ⚠️ Sharp tidak terinstall — foto disimpan tanpa kompresi. Jalankan: npm install');
