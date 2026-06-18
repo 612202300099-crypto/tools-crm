@@ -19,7 +19,7 @@ const StabilityManager = require('./services/stability_manager');
 const MediaQueueService = require('./services/media_queue_service');
 const objectStorage = require('./services/object_storage_service');
 const pendingOrderSvc = require('./services/pending_order_service');
-const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidateConfigCache, withTimeout } = require('./services/ai_followup_service');
+const { checkAndRespond, checkAndRespondMedia, sendPostOrderFollowUp, invalidateConfigCache, withTimeout, sendWAMessageDirect } = require('./services/ai_followup_service');
 
 const { router: localApiRouter, authenticateToken } = require('./api');
 const db = require('./db');
@@ -1314,18 +1314,27 @@ app.get('/api/wa/session-health', (req, res) => {
     }
 });
 
-app.post('/api/wa/send', async (req, res) => {
+app.post('/api/wa/send', authenticateToken, async (req, res) => {
     const { phone_number, message, customer_id } = req.body;
+    
+    // [FIX] Validasi input — cegah kirim ke undefined atau pesan kosong
+    if (!phone_number || typeof phone_number !== 'string' || !phone_number.trim()) {
+        return res.status(400).json({ error: 'phone_number wajib diisi' });
+    }
+    if (!message || typeof message !== 'string' || !message.trim()) {
+        return res.status(400).json({ error: 'message wajib diisi' });
+    }
+    
     if (!isConnected) return res.status(400).json({ error: 'WhatsApp is not connected' });
 
     try {
-        const chatId = phone_number + '@c.us';
-        // [FIX] Timeout ditingkatkan 30s → 45s dan DIBUNGKUS chromeSemaphore agar tidak hang
-        await withTimeout(
-            chromeSemaphore.acquire('API:sendMessage', () => client.sendMessage(chatId, message), { priority: 1, timeout: 45000 }),
-            45000,
-            'sendMessage_API'
-        );
+        // [FIX] Kirim via outgoingQueue (anti-spam system) — tidak bypass rate limiter
+        // sendWAMessageDirect() menggunakan outgoingQueue.enqueue() dengan:
+        // - Serial queue (1 pesan per waktu)
+        // - Cooldown 45 detik per customer
+        // - Hourly cap 40 pesan/jam
+        // - Quiet hours 23:00–07:00 WIB
+        await sendWAMessageDirect(client, phone_number, message);
 
         // [FIX] TIDAK perlu insert manual ke DB di sini!
         // Saat sendMessage berhasil, event 'message_create' otomatis terpicu

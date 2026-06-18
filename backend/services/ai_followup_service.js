@@ -409,10 +409,11 @@ async function sendWAMessage(waClient, phoneNumber, message) {
         await outgoingQueue.enqueue(waClient, phoneNumber, message);
         console.log(`[AI-BOT] 💬 Pesan diantrekan → ${phoneNumber}: "${message.substring(0, 50)}..."`);
     } catch (err) {
-        // HOURLY_LIMIT atau QUEUE_FULL tidak perlu throw — cukup log
+        // [FIX] HOURLY_LIMIT/QUEUE_FULL sekarang di-throw agar caller (admin endpoint)
+        // bisa memberi feedback error ke admin, bukan false success
         if (err.message === 'HOURLY_LIMIT_REACHED' || err.message === 'QUEUE_FULL') {
-            console.warn(`[AI-BOT] ⏭️ Pesan ke ${phoneNumber} dilewati: ${err.message}`);
-            return;
+            console.warn(`[AI-BOT] ⛔ Pesan ke ${phoneNumber} DITOLAK: ${err.message}`);
+            throw err;
         }
         throw err;
     }

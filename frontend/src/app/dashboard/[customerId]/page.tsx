@@ -682,14 +682,30 @@ export default function ChatDetail() {
             ))}
           </div>
 
-          {/* ── SILENT MODE: Reply dinonaktifkan sementara ── */}
-          <div className="p-4 bg-amber-50 border-t border-amber-200">
-            <div className="flex items-center gap-2 bg-amber-100 border border-amber-300 rounded-xl px-4 py-3">
-              <span className="text-lg">🤫</span>
-              <div>
-                <p className="text-xs font-black text-amber-800">Mode Diam Aktif</p>
-                <p className="text-[10px] text-amber-600 mt-0.5">Balasan dari web &amp; bot dinonaktifkan sementara. Sistem tetap mencatat semua chat &amp; nomor pesanan masuk secara otomatis.</p>
-              </div>
+          {/* ── Reply Input ── */}
+          <div className="p-3 bg-white border-t border-gray-200">
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && sendQuickReply()}
+                placeholder="Ketik balasan..."
+                disabled={isSending}
+                className="flex-1 px-3 py-2 text-sm border border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent disabled:opacity-50 disabled:cursor-not-allowed placeholder:text-gray-400"
+              />
+              <button
+                onClick={() => sendQuickReply()}
+                disabled={isSending || !replyText.trim()}
+                className="px-3 py-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-150 flex items-center gap-1.5"
+              >
+                {isSending ? (
+                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <Send size={16} />
+                )}
+                <span className="text-sm font-medium hidden sm:inline">Kirim</span>
+              </button>
             </div>
           </div>
         </div>
