@@ -615,11 +615,17 @@ export default function ChatDetail() {
     const textToSend = templateText || replyText;
     if (!textToSend.trim()) return;
     
+    const token = localStorage.getItem('access_token');
+    if (!token) return alert('Sesi berakhir, silakan login ulang');
+    
     setIsSending(true);
     try {
         const res = await fetch(`${WA_API_URL}/api/wa/send`, {
            method: 'POST',
-           headers: { 'Content-Type': 'application/json' },
+           headers: { 
+               'Content-Type': 'application/json',
+               'Authorization': `Bearer ${token}`
+           },
            body: JSON.stringify({ 
                phone_number: customer.phone_number, 
                message: textToSend,
