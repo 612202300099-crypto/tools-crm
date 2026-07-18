@@ -393,7 +393,7 @@ function detectChromePath() {
         // ── Linux VPS (urutan prioritas: Chrome stable → Chromium → snap) ──
         '/usr/bin/google-chrome-stable',
         '/usr/bin/google-chrome',
-        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome-stable',
         '/usr/bin/chromium',
         '/snap/bin/chromium',
         '/usr/lib/chromium-browser/chromium-browser',
@@ -423,7 +423,8 @@ const client = new Client({
         // Di VPS, Chrome sering butuh lebih lama untuk merespons karena CPU/RAM terbatas.
         // Tanpa ini: 15 worker download → Chrome kewalahan → "Runtime.callFunctionOn timed out"
         // → Chrome crash → "Execution context destroyed" → Session mati → QR ulang.
-        protocolTimeout: 180000, // 180 detik (3 menit) — cukup untuk VPS lambat
+        protocolTimeout: 300000, // 300 detik (5 menit) — untuk menampung 10 media workers
+
         // [BEST PRACTICE] Args optimasi untuk VPS Linux 24/7
         args: [
             '--no-sandbox',               // Wajib di Linux tanpa root sandboxing
@@ -437,7 +438,7 @@ const client = new Client({
             '--disable-background-timer-throttling',
             '--disable-backgrounding-occluded-windows',
             '--disable-renderer-backgrounding',
-            '--js-flags=--max-old-space-size=512'  // 512MB lebih aman di VPS
+            '--js-flags=--max-old-space-size=4096' // [CRITICAL FIX] 4GB agar WA Web tidak crash saat loading ribuan kontak (Target closed)
         ]
     }
 });
@@ -529,15 +530,17 @@ async function hydrateContactCache() {
 async function processMessageCommand(message, skipCustomerUpdate = false, isPriority = false, cachedContext = null) {
     try {
         const isFromMe = message.fromMe;
-        const waMessageId = message.id._serialized;
+        let waMessageId = message.id?._serialized || `false_${message.from}_${message.id?.id || Date.now()}`;
         const msgTimestamp = new Date(message.timestamp * 1000).toISOString();
-        const secureMessageHash = message.id.id || waMessageId.split('_').pop();
+        const secureMessageHash = message.id?.id || waMessageId.split('_').pop();
 
         stability.heartbeat(); // Kirim detak jantung ke Watchdog
         console.log(`[DEBUG] 📩 Masuk processMessageCommand | Dari: ${message.from} | Tipe: ${message.type}`);
 
-        // Abaikan status broadcast agar tidak memicu error getChat
-        if (message.from === 'status@broadcast') {
+        // Abaikan notifikasi sistem LID atau broadcast agar tidak memicu error getChat 'r'
+        const IGNORED_TYPES = ['e2e_notification', 'notification_template', 'protocol', 'gp2'];
+        if (message.from === 'status@broadcast' || IGNORED_TYPES.includes(message.type)) {
+            console.log(`[DEBUG] 🚫 Mengabaikan pesan sistem: ${message.type} dari ${message.from}`);
             return;
         }
 
@@ -556,14 +559,48 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             // Masih butuh skip broadcast
             if (chat.isGroup) return;
         } else {
-            try {
-                // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
-                chat = await chromeSemaphore.acquire('getChat', () => {
-                    return withTimeout(message.getChat(), 60000, 'getChat');
-                }, { priority: 1, timeout: 90000 });
-            } catch (e) {
-                console.error(`[TIMEOUT-GUARD] getChat gagal/timeout:`, e.message);
-                return;
+            let chatRetry = 0;
+            // Langsung gunakan fallback untuk @lid karena getChat sering gagal/timeout
+            if (message.from.includes('@lid')) {
+                chat = {
+                    isGroup: false,
+                    id: {
+                        user: message.from.split('@')[0],
+                        server: 'lid',
+                        _serialized: message.from
+                    },
+                    getContact: async () => ({ pushname: 'Pelanggan Baru' })
+                };
+            } else {
+                while (chatRetry < 3) {
+                    try {
+                        // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
+                        chat = await chromeSemaphore.acquire('getChat', () => {
+                            return withTimeout(message.getChat(), 60000, 'getChat');
+                        }, { priority: 1, timeout: 90000 });
+                        break;
+                    } catch (e) {
+                        const errMsg = e?.message || String(e);
+                        console.warn(`[TIMEOUT-GUARD] getChat gagal iterasi ${chatRetry + 1}: ${errMsg === 'r' ? 'Internal Error WA (r)' : errMsg}`);
+                        chatRetry++;
+                        if (chatRetry >= 3) {
+                            console.warn(`[TIMEOUT-GUARD] Menggunakan fallback untuk ${message.from} karena gagal getChat berulang kali.`);
+                            // [FALLBACK] Jika gagal mendapatkan chat, gunakan dummy object
+                            chat = {
+                                isGroup: message.from.includes('@g.us'),
+                                id: {
+                                    user: message.from.split('@')[0],
+                                    server: message.from.split('@')[1] || 'c.us',
+                                    _serialized: message.from
+                                },
+                                getContact: async () => ({ pushname: 'Pelanggan Baru' })
+                            };
+                            break;
+                        }
+                        // Tunggu 2 detik, beri Chrome waktu memuat chat model sebelum mencoba lagi
+                        await new Promise(res => setTimeout(res, 2000));
+                    }
+                }
             }
 
             if (chat.isGroup) return;
@@ -584,6 +621,13 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             } catch (err) { /* silent fallback untuk pushname */ }
             
             console.log(`[DEBUG] 🔍 Resolved Phone Number: ${customerPhoneNumber} (LID Network: ${isLidNetwork})`);
+            
+            // [CRITICAL FIX] Ensure message.id._serialized is ALWAYS set so downloadMedia works!
+            if (!message.id) message.id = {};
+            if (!message.id._serialized) {
+                message.id._serialized = waMessageId;
+                console.log(`[DEBUG] 🔧 Injected missing _serialized ID for downloadMedia: ${waMessageId}`);
+            }
         }
 
         // [SHIELD LEVEL 3] Validasi Nomor Ketat (Bukan ID / Hash Angka Panjang) Poin 5 & 6
@@ -1006,7 +1050,7 @@ client.on('message_revoke_everyone', async (after, before) => {
             .single();
 
         if (!dbMsg) {
-            console.log(`❌ [REVOKE GAGAL] Pesan Hash ${targetHash} tidak ditemukan dalam penyimpanan DB.`);
+            // console.log(`❌ [REVOKE GAGAL] Pesan Hash ${targetHash} tidak ditemukan dalam penyimpanan DB.`);
             return;
         }
 
@@ -2355,58 +2399,7 @@ server.listen(PORT, '0.0.0.0', () => {
     const driveStatus = driveService.getDrive() ? '🟢 AKTIF' : '🔴 TIDAK AKTIF (cek .env + service-account.json)';
     console.log(`☁️ Google Drive Upload: ${driveStatus} — proses antrian setiap 30 detik (tidak perlu WA konek).`);
 
-    // ── AUTO-SWEEP: Setiap 4 jam, sweep chat aktif 24 jam terakhir ──────
-    // [ROADMAP F2-FEAT1] Pengganti Startup Sync yang dinonaktifkan.
-    // AMAN: skipCustomerUpdate=true — tidak spam customer, priority rendah (3).
-    cron.schedule('0 */4 * * *', async () => {
-        if (!isConnected) {
-            console.log('[AUTO-SWEEP] ⏭️ WA belum konek — auto-sweep ditunda ke siklus berikutnya.');
-            return;
-        }
-        if (stability.isBusy()) {
-            console.log('[AUTO-SWEEP] ⏭️ Sistem BUSY — auto-sweep ditunda.');
-            return;
-        }
-        console.log('[AUTO-SWEEP] 🔄 Memulai auto-sweep chat aktif (24 jam terakhir)...');
-        try {
-            const chats = await chromeSemaphore.acquire('AUTO-SWEEP:getChats', () => {
-                return withTimeout(client.getChats(), 60000, 'getChats_autosweep');
-            }, { priority: 3, timeout: 90000 });
-
-            const cutoff24h = Math.floor(Date.now() / 1000) - (24 * 60 * 60);
-            const activeChats = chats.filter(c =>
-                !c.isGroup &&
-                c.id.user !== 'status' &&
-                c.id.user !== 'broadcast' &&
-                c.lastMessage &&
-                c.lastMessage.timestamp >= cutoff24h
-            );
-            console.log('[AUTO-SWEEP] 📋 ' + activeChats.length + ' chat aktif dalam 24 jam. Mulai menyisir...');
-
-            let sweepCount = 0;
-            let mediaCount = 0;
-            for (const chat of activeChats) {
-                try {
-                    const messages = await chromeSemaphore.acquire('AUTO-SWEEP:fetchMsg', () => {
-                        return withTimeout(chat.fetchMessages({ limit: 100 }), 45000, 'fetchMessages_autosweep');
-                    }, { priority: 3, timeout: 60000 });
-
-                    for (const msg of messages) {
-                        if (msg.timestamp >= cutoff24h && !msg.fromMe) {
-                            await processMessageCommand(msg, true, false); // skipCustomerUpdate=true, tidak spam
-                            if (msg.hasMedia) mediaCount++;
-                        }
-                    }
-                    sweepCount++;
-                    await sleep(800); // Jeda antar chat — beri Chrome waktu bernapas
-                } catch (err) {
-                    console.warn('[AUTO-SWEEP] ⚠️ Skip ' + chat.id.user + ': ' + err.message.substring(0, 60));
-                }
-            }
-            console.log('[AUTO-SWEEP] ✅ Selesai: ' + sweepCount + ' chat disapu, ' + mediaCount + ' media diproses.');
-        } catch (err) {
-            console.error('[AUTO-SWEEP] ❌ Error:', err.message);
-        }
-    });
-    console.log('🔄 Auto-Sweep aktif: setiap 4 jam, menyisir chat aktif 24 jam terakhir.');
+    // ── AUTO-SWEEP: DINONAKTIFKAN SESUAI PERMINTAAN USER ──────
+    // cron.schedule('0 */4 * * *', async () => { ... });
+    console.log('🔄 Auto-Sweep dinonaktifkan.');
 });
