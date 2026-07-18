@@ -565,34 +565,48 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
             // Masih butuh skip broadcast
             if (chat.isGroup) return;
         } else {
-            let chatRetry = 0;
-            while (chatRetry < 3) {
-                try {
-                    // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
-                    chat = await chromeSemaphore.acquire('getChat', () => {
-                        return withTimeout(message.getChat(), 60000, 'getChat');
-                    }, { priority: 1, timeout: 90000 });
-                    break;
-                } catch (e) {
-                    const errMsg = e?.message || String(e);
-                    console.error(`[TIMEOUT-GUARD] getChat gagal/timeout iterasi ${chatRetry}:`, errMsg);
-                    chatRetry++;
-                    if (chatRetry >= 3) {
-                        console.error(`[TIMEOUT-GUARD] Menggunakan fallback LID untuk ${message.from} karena gagal getChat.`);
-                        // [LID FALLBACK] Jika gagal mendapatkan chat (biasanya LID chat), gunakan dummy object
-                        chat = {
-                            isGroup: message.from.includes('@g.us'),
-                            id: {
-                                user: message.from.split('@')[0],
-                                server: message.from.split('@')[1],
-                                _serialized: message.from
-                            },
-                            getContact: async () => ({ pushname: 'Pelanggan Baru' })
-                        };
+            // [CRITICAL FIX] Fast-path bypass untuk nomor @lid agar tidak hang/timeout 3 menit
+            if (message.from.includes('@lid')) {
+                // Langsung gunakan fallback LID tanpa mencoba getChat
+                chat = {
+                    isGroup: message.from.includes('@g.us'),
+                    id: {
+                        user: message.from.split('@')[0],
+                        server: message.from.split('@')[1],
+                        _serialized: message.from
+                    },
+                    getContact: async () => ({ pushname: 'Pelanggan Baru' })
+                };
+            } else {
+                let chatRetry = 0;
+                while (chatRetry < 3) {
+                    try {
+                        // [CHROME-SEM] Priority 1 = incoming messages (highest priority)
+                        chat = await chromeSemaphore.acquire('getChat', () => {
+                            return withTimeout(message.getChat(), 60000, 'getChat');
+                        }, { priority: 1, timeout: 90000 });
                         break;
+                    } catch (e) {
+                        const errMsg = e?.message || String(e);
+                        console.error(`[TIMEOUT-GUARD] getChat gagal/timeout iterasi ${chatRetry}:`, errMsg);
+                        chatRetry++;
+                        if (chatRetry >= 3) {
+                            console.error(`[TIMEOUT-GUARD] Menggunakan fallback LID untuk ${message.from} karena gagal getChat.`);
+                            // [LID FALLBACK] Jika gagal mendapatkan chat (biasanya LID chat), gunakan dummy object
+                            chat = {
+                                isGroup: message.from.includes('@g.us'),
+                                id: {
+                                    user: message.from.split('@')[0],
+                                    server: message.from.split('@')[1],
+                                    _serialized: message.from
+                                },
+                                getContact: async () => ({ pushname: 'Pelanggan Baru' })
+                            };
+                            break;
+                        }
+                        // Tunggu 2 detik, beri Chrome waktu memuat chat model sebelum mencoba lagi
+                        await new Promise(res => setTimeout(res, 2000));
                     }
-                    // Tunggu 2 detik, beri Chrome waktu memuat chat model sebelum mencoba lagi
-                    await new Promise(res => setTimeout(res, 2000));
                 }
             }
 
