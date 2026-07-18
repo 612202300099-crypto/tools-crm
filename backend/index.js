@@ -101,7 +101,13 @@ app.use(express.json());
 
 // --- DEBUG LOGGING MIDDLEWARE ---
 app.use((req, res, next) => {
-    if ((req.url.includes('/login') || req.url.includes('/api/')) && !req.url.includes('/drive-status')) {
+    const isPollingEndpoint = req.url.includes('/drive-status') || 
+                              req.url.includes('/api/wa/status') || 
+                              req.url.includes('/api/local/drive-stats') ||
+                              req.url.includes('/api/health') ||
+                              req.url.includes('/api/wa/session-health');
+                              
+    if ((req.url.includes('/login') || req.url.includes('/api/')) && !isPollingEndpoint) {
         console.log(`[REQ] ${req.method} ${req.url} from ${req.headers.origin || 'unknown'} - Body:`, req.body ? JSON.stringify(req.body).substring(0, 100) : 'none');
     }
     next();
