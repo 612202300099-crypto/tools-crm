@@ -305,11 +305,17 @@ class MediaQueueService {
                     }
 
                     // 2. Unduh Media (Chrome-bound)
-                    const mediaData = await this.withTimeout(
-                        msg.downloadMedia(),
-                        this.downloadTimeout,
-                        'downloadMedia'
-                    );
+                    let mediaData = null;
+                    try {
+                        mediaData = await this.withTimeout(
+                            msg.downloadMedia(),
+                            this.downloadTimeout,
+                            'downloadMedia'
+                        );
+                    } catch (err) {
+                        console.error(`[W-${workerId}] ⚠️ Error unduh media:`, err.message);
+                    }
+                    
                     return { message: msg, media: mediaData };
                 },
                 { priority: 2, timeout: 180000 }
@@ -407,29 +413,7 @@ class MediaQueueService {
 
             if (mediaError) throw new Error(`DB Insert Error: ${mediaError.message}`);
 
-            let excludedFromProduction = false;
-            try {
-                const { autoClassifyOrderImage } = require('./media_service');
-                const classifyResult = await autoClassifyOrderImage({
-                    mediaId: mediaRecord.id,
-                    customerId: job.customerId,
-                    buffer,
-                    ext,
-                    supabase: this.supabase,
-                    waClient: this.client,
-                });
-                if (classifyResult && classifyResult.found) {
-                    excludedFromProduction = true;
-                    console.log(`[W-${workerId}] Foto nomor pesanan terdeteksi (${classifyResult.orderId}) - exclude dari produksi/Drive.`);
-                }
-            } catch (classifyErr) {
-                console.warn(`[W-${workerId}] Auto scan nomor pesanan skip: ${classifyErr.message.substring(0, 80)}`);
-            }
 
-            if (excludedFromProduction) {
-                console.log(`[W-${workerId}] Sukses simpan bukti nomor pesanan. Tidak dihitung sebagai foto produksi.`);
-                return true;
-            }
 
             // 6. Update Status Customer
             await this.withTimeout(

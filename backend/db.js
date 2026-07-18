@@ -7,6 +7,18 @@ const db = new Database(dbPath);
 
 // Enable WAL mode for better concurrency and performance
 db.pragma('journal_mode = WAL');
+db.pragma('wal_autocheckpoint = 1000'); // Checkpoint otomatis tiap 1000 halaman
+
+// [OPTIMASI] Interval Checkpoint Pasif setiap 15 menit
+// Mencegah file WAL membengkak puluhan MB jika load sangat berat dan auto-checkpoint tertunda.
+setInterval(() => {
+    try {
+        db.pragma('wal_checkpoint(PASSIVE)');
+    } catch (err) {
+        console.error('[DB] Gagal passive checkpoint:', err.message);
+    }
+}, 15 * 60 * 1000);
+
 
 // Initialize schema — Tabel utama
 db.exec(`

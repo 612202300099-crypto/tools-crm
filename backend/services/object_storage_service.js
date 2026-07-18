@@ -57,9 +57,10 @@ function getS3() {
             if (!endpoint)  missing.push('OBJECT_STORAGE_ENDPOINT');
             if (!accessKey) missing.push('OBJECT_STORAGE_ACCESS_KEY');
             if (!secretKey) missing.push('OBJECT_STORAGE_SECRET_KEY');
+            
             if (missing.length > 0) {
                 if (!_envWarningLogged) {
-                    console.log(`[OBJ-STORAGE] ⚠️ ENV kosong: ${missing.join(', ')}. Pastikan .env terbaca oleh dotenv. (Peringatan ini hanya muncul sekali)`);
+                    console.warn(`[OBJ-STORAGE] ⚠️ ENV kosong: ${missing.join(', ')}. Pastikan .env terbaca oleh dotenv.`);
                     _envWarningLogged = true;
                 }
                 return null; // Belum dikonfigurasi
@@ -78,12 +79,9 @@ function getS3() {
         return { client: _s3Client, cmds: _s3Commands };
 
     } catch (e) {
-        if (!_sdkWarningLogged) {
-            // SDK belum terinstall — log detail agar tidak bingung
-            console.error(`[OBJ-STORAGE] ❌ Gagal load @aws-sdk/client-s3: ${e.message}`);
-            console.error(`[OBJ-STORAGE] 💡 Jalankan: npm install @aws-sdk/client-s3`);
-            _sdkWarningLogged = true;
-        }
+        // SDK belum terinstall — log detail agar tidak bingung
+        console.error(`[OBJ-STORAGE] ❌ Gagal load @aws-sdk/client-s3: ${e.message}`);
+        console.error(`[OBJ-STORAGE] 💡 Jalankan: npm install @aws-sdk/client-s3`);
         return null;
     }
 }
@@ -94,7 +92,10 @@ async function isObjectStorageAvailable() {
 
     const s3 = getS3();
     if (!s3) {
-        console.log('[OBJ-STORAGE] ⚠️ AWS SDK tidak ditemukan atau env belum diisi. Jalankan: npm install @aws-sdk/client-s3');
+        if (!_sdkWarningLogged) {
+            console.warn('[OBJ-STORAGE] ⚠️ AWS SDK tidak ditemukan atau env belum diisi. Jalankan: npm install @aws-sdk/client-s3');
+            _sdkWarningLogged = true;
+        }
         _isAvailable = false;
         return false;
     }
