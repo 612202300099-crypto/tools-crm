@@ -588,11 +588,13 @@ async function processMessageCommand(message, skipCustomerUpdate = false, isPrio
                         break;
                     } catch (e) {
                         const errMsg = e?.message || String(e);
-                        console.error(`[TIMEOUT-GUARD] getChat gagal/timeout iterasi ${chatRetry}:`, errMsg);
+                        // Jika error instant (seperti 'r' dari minified code Puppeteer), tidak perlu retry 3x.
+                        const isInstantFail = errMsg === 'r' || errMsg === 'Evaluation failed' || errMsg.includes('Session closed');
+                        
                         chatRetry++;
-                        if (chatRetry >= 3) {
-                            console.error(`[TIMEOUT-GUARD] Menggunakan fallback LID untuk ${message.from} karena gagal getChat.`);
-                            // [LID FALLBACK] Jika gagal mendapatkan chat (biasanya LID chat), gunakan dummy object
+                        if (chatRetry >= 3 || isInstantFail) {
+                            console.log(`[WA-CHAT] ℹ️ Menggunakan fallback data untuk ${message.from} (Chat tidak ditemukan di sesi ini).`);
+                            // [LID FALLBACK] Jika gagal mendapatkan chat, gunakan dummy object
                             chat = {
                                 isGroup: message.from.includes('@g.us'),
                                 id: {
